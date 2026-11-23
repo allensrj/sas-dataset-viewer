@@ -1,0 +1,242 @@
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <fcntl.h>
+#include <errno.h>
+#if !defined(_MSC_VER)
+#   include <sys/time.h>
+#endif
+
+#include "../readstat.h"
+#include "../readstat_iconv.h"
+
+#include "../stata/readstat_dta.h"
+
+#include "test_buffer.h"
+#include "test_buffer_io.h"
+#include "test_types.h"
+#include "test_error.h"
+#include "test_readstat.h"
+#include "test_read.h"
+#include "test_sas.h"
+#include "test_write.h"
+#include "test_list.h"
+
+static rt_test_args_t _test_args[] = {
+    {
+        .row_limit = 0,
+        .row_offset = 0,
+    },
+    {
+        .row_limit = 1,
+        .row_offset = 1,
+    },
+    {
+        /* For resources/datetime.sas7bdat, this offset lands between the
+         * live row count and the physical row count, exercising the
+         * deleted-row arithmetic */
+        .row_limit = 0,
+        .row_offset = 4,
+    }
+};
+
+static int test_txt_schema_bounds(void) {
+    char data[] = "hello\nworld\n";
+    rt_buffer_t buffer = { .bytes = data, .size = sizeof(data)-1, .used = sizeof(data)-1 };
+    rt_buffer_ctx_t buffer_ctx = { .buffer = &buffer };
+    readstat_schema_entry_t entry = { .row = 1, .col = 0, .len = 5 };
+    readstat_schema_t schema = { .rows_per_observation = 1, .entry_count = 1, .entries = &entry };
+    readstat_error_t error = READSTAT_OK;
+
+    readstat_parser_t *parser = readstat_parser_init();
+    readstat_set_open_handler(parser, rt_open_handler);
+    readstat_set_close_handler(parser, rt_close_handler);
+    readstat_set_seek_handler(parser, rt_seek_handler);
+    readstat_set_read_handler(parser, rt_read_handler);
+    readstat_set_update_handler(parser, rt_update_handler);
+    readstat_set_io_ctx(parser, &buffer_ctx);
+
+    /* Row past the declared number of lines per observation */
+    error = readstat_parse_txt(parser, NULL, &schema, NULL);
+    if (error != READSTAT_ERROR_PARSE) {
+        printf("Expected a parse error for an out-of-range row, got: %s\n",
+                readstat_error_message(error));
+        readstat_parser_free(parser);
+        return 1;
+    }
+
+    /* Column whose end does not fit in 32 bits */
+    entry.row = 0;
+    entry.col = UINT32_MAX;
+    buffer_ctx.pos = 0;
+    error = readstat_parse_txt(parser, NULL, &schema, NULL);
+    if (error != READSTAT_ERROR_PARSE) {
+        printf("Expected a parse error for an out-of-range column, got: %s\n",
+                readstat_error_message(error));
+        readstat_parser_free(parser);
+        return 1;
+    }
+
+    readstat_parser_free(parser);
+    return 0;
+}
+
+static ssize_t test_write_data(const void *bytes, size_t len, void *ctx) {
+    rt_buffer_t *buffer = (rt_buffer_t *)ctx;
+    buffer_grow(buffer, len);
+    if (buffer->bytes == NULL)
+        return -1;
+    memcpy(buffer->bytes + buffer->used, bytes, len);
+    buffer->used += len;
+    return len;
+}
+
+/* A row after the declared row count, e.g. from a reader whose row count was
+ * truncated, must be refused rather than reach a module context that
+ * readstat_end_writing has already freed */
+static int test_write_row_after_end(void) {
+    rt_buffer_t *buffer = buffer_init();
+    readstat_writer_t *writer = readstat_writer_init();
+    readstat_error_t error = READSTAT_OK;
+    int failed = 0;
+
+    readstat_set_data_writer(writer, &test_write_data);
+    readstat_variable_t *variable = readstat_add_variable(writer, "VAR1", READSTAT_TYPE_STRING, 8);
+
+    if ((error = readstat_begin_writing_por(writer, buffer, 1)) != READSTAT_OK ||
+            (error = readstat_begin_row(writer)) != READSTAT_OK ||
+            (error = readstat_insert_string_value(writer, variable, "abc")) != READSTAT_OK ||
+            (error = readstat_end_row(writer)) != READSTAT_OK ||
+            (error = readstat_end_writing(writer)) != READSTAT_OK) {
+        printf("Error writing POR file: %s\n", readstat_error_message(error));
+        failed = 1;
+        goto cleanup;
+    }
+
+    readstat_begin_row(writer);
+    readstat_insert_string_value(writer, variable, "def");
+    error = readstat_end_row(writer);
+    if (error != READSTAT_ERROR_ROW_COUNT_MISMATCH) {
+        printf("Expected a row count error for a row after the end, got: %s\n",
+                readstat_error_message(error));
+        failed = 1;
+    }
+
+cleanup:
+    readstat_writer_free(writer);
+    buffer_free(buffer);
+    return failed;
+}
+
+static void dump_buffer(rt_buffer_t *buffer, long format) {
+    char filename[128];
+#if !defined _MSC_VER
+    snprintf(filename, sizeof(filename), "/tmp/test_readstat.%s", file_extension(format));
+#else
+    snprintf(filename, sizeof(filename), "test_readstat.%s", file_extension(format));
+#endif
+#if DEBUG
+    printf("Writing file buffer to %s\n", filename);
+    FILE *file = fopen(filename, "wb");
+    int bytes_written = fwrite(buffer->bytes, 1, buffer->used, file);
+    if (bytes_written != buffer->used)
+        printf("Failed to write file!\n");
+    fclose(file);
+#endif
+}
+
+int main(int argc, char *argv[]) {
+    rt_buffer_t *buffer = buffer_init();
+    readstat_error_t error = READSTAT_OK;
+
+    int g, t, a, f;
+
+    for (g=0; g<sizeof(_test_groups)/sizeof(_test_groups[0]); g++) {
+        for (t=0; t<MAX_TESTS_PER_GROUP; t++) {
+            rt_test_file_t *file = &_test_groups[g].tests[t];
+            if (!(file->label[0] || file->resource_name[0]))
+                break;
+
+            for (a=0; a<sizeof(_test_args)/sizeof(_test_args[0]); a++) {
+                rt_test_args_t *args = &_test_args[a];
+                rt_parse_ctx_t *parse_ctx = parse_ctx_init(buffer, file, args);
+
+                for (f=RT_FORMAT_DTA_104; f<RT_FORMAT_ALL; f*=2) {
+                    if (!(file->test_formats & f))
+                        continue;
+
+                    int old_errors_count = parse_ctx->errors_count;
+                    parse_ctx_reset(parse_ctx, f);
+
+                    if (file->resource_name[0] == '\0') {
+                        error = write_file_to_buffer(file, buffer, f);
+                        if (error != file->write_error) {
+                            push_error_if_codes_differ(parse_ctx, file->write_error, error);
+                            error = READSTAT_OK;
+                            continue;
+                        }
+                        if (error != READSTAT_OK) {
+                            error = READSTAT_OK;
+                            continue;
+                        }
+                        if (file->unknown_row_count && (f & RT_FORMAT_SAV) && buffer->used >= 84) {
+                            int32_t unknown = -1;
+                            memcpy(&buffer->bytes[80], &unknown, sizeof(unknown));
+                        }
+                    } else {
+                        error = buffer_read_from_resource(buffer, file->resource_name);
+                        if (error != READSTAT_OK)
+                            break;
+                    }
+
+                    error = read_file(parse_ctx, f);
+                    if (error != READSTAT_OK)
+                        break;
+
+                    if (old_errors_count != parse_ctx->errors_count)
+                        dump_buffer(buffer, f);
+                }
+
+                if (parse_ctx->errors_count) {
+                    int i;
+                    for (i=0; i<parse_ctx->errors_count; i++) {
+                        print_error(&parse_ctx->errors[i]);
+                    }
+                    parse_ctx_free(parse_ctx);
+                    buffer_free(buffer);
+                    return 1;
+                }
+
+                parse_ctx_free(parse_ctx);
+
+                if (error != READSTAT_OK)
+                    goto cleanup;
+            }
+        }
+    }
+
+cleanup:
+    if (error != READSTAT_OK) {
+        dump_buffer(buffer, f);
+        rt_test_file_t *file = &_test_groups[g].tests[t];
+        char *test_name = file->label[0] ? file->label : file->resource_name;
+        printf("Error running test \"%s\" (format=%s): %s\n", 
+                test_name, file_extension(f), readstat_error_message(error));
+        buffer_free(buffer);
+        return 1;
+    }
+    buffer_free(buffer);
+
+    if (test_sas7bcat_large_label_sets() != 0)
+        return 1;
+
+    if (test_txt_schema_bounds() != 0)
+        return 1;
+
+    if (test_write_row_after_end() != 0)
+        return 1;
+
+    return 0;
+}

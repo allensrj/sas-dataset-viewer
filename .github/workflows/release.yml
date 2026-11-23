@@ -1,0 +1,61 @@
+name: Build Windows & macOS Releases
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Windows standalone exe
+        run: cargo build --release --bin sas-viewer
+
+      - name: Package Windows executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target\release\sas-viewer.exe dist\SAS-Dataset-Viewer-win64.exe
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SAS-Dataset-Viewer-Windows
+          path: dist/SAS-Dataset-Viewer-win64.exe
+
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build macOS .app bundle
+        run: bash scripts/bundle_macos.sh
+
+      - name: Zip macOS .app bundle
+        run: |
+          cd dist
+          zip -r SAS-Dataset-Viewer-macOS-arm64.zip "SAS Dataset Viewer.app"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SAS-Dataset-Viewer-macOS
+          path: dist/SAS-Dataset-Viewer-macOS-arm64.zip

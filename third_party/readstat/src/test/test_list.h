@@ -1,0 +1,4125 @@
+
+#define RT_FORMAT_TEST_TIMESTAMPS  (RT_FORMAT_DTA_105_AND_NEWER | RT_FORMAT_SPSS | RT_FORMAT_SAS7BDAT)
+
+/* Four lowercase sharp-S characters: 4 UTF-8 characters in 8 bytes */
+#define RT_UTF8_SZ4 "\xc3\x9f\xc3\x9f\xc3\x9f\xc3\x9f"
+#define RT_UTF8_SZ32 RT_UTF8_SZ4 RT_UTF8_SZ4 RT_UTF8_SZ4 RT_UTF8_SZ4 RT_UTF8_SZ4 RT_UTF8_SZ4 RT_UTF8_SZ4 RT_UTF8_SZ4
+
+static rt_test_group_t _test_groups[] = {
+    {
+        .label = "Table name",
+        .tests = {
+            {
+                .label = "Legal name",
+                .test_formats = RT_FORMAT_XPORT,
+                .table_name = "hello",
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label = "Double-precision variable"
+                    }
+                }
+            },
+            {
+                .label = "Illegal name",
+                .test_formats = RT_FORMAT_XPORT,
+                .table_name = "#&(@!",
+                .write_error = READSTAT_ERROR_NAME_CONTAINS_ILLEGAL_CHARACTER,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label = "Double-precision variable"
+                    }
+                }
+            },
+        }
+    },
+
+    {
+        .label = "XPORT blank rows",
+        .tests = {
+            {
+                /* V8 records the row count, so trailing all-blank rows
+                 * are data rather than end-of-file padding */
+                .label = "XPORT v8 trailing blank rows",
+                .test_formats = RT_FORMAT_XPORT_8,
+                .rows = 3,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .label = "String variable",
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "Hello" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } }
+                        }
+                    }
+                }
+            },
+            {
+                /* Without a row count, blank rows at least a line wide
+                 * cannot be padding */
+                .label = "XPORT v5 trailing blank rows of a full line",
+                .test_formats = RT_FORMAT_XPORT_5,
+                .rows = 3,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .label = "String variable",
+                        .user_width = 80,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "Hello" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } }
+                        }
+                    }
+                }
+            },
+        }
+    },
+
+    {
+        .label = "SAV unknown row count",
+        .tests = {
+            {
+                .label = "Header case count of -1 with several rows",
+                .test_formats = RT_FORMAT_SAV,
+                .unknown_row_count = 1,
+                .rows = 5,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 2.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 3.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 4.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 5.0 } }
+                        }
+                    },
+                    {
+                        .name = "VAR2",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 10,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "one" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "two" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "three" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "four" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "five" } }
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Notes",
+        .tests = {
+            {
+                .label = "Short notes",
+                .test_formats = RT_FORMAT_DTA_105_AND_NEWER | RT_FORMAT_SPSS,
+
+                .notes_count = 2,
+                .notes = {
+                    "This is a note",
+                    "This is another note"
+                },
+
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label = "Double-precision variable"
+                    }
+                }
+            },
+
+            {
+                .label = "Long notes",
+                .write_error = READSTAT_ERROR_NOTE_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_SPSS,
+
+                .notes_count = 1,
+                .notes = {
+                    "This is a note that is longer than the 80-byte line length of "
+                    "the SPSS document record, and will produce an error."
+                },
+
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label = "Double-precision variable"
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Compression tests",
+        .tests = {
+            {
+                .label = "SAV row compression",
+                .test_formats = RT_FORMAT_SAV_COMP,
+                .rows = 3,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label = "Double-precision variable",
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -100.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_system_missing = 1 }
+                        }
+                    },
+
+                    {
+                        .name = "VAR2",
+                        .type = READSTAT_TYPE_STRING,
+                        .label = "String variable",
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "spaces->        <-- here" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "blah" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "blahblahblah" } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "SAV short row compression",
+                .test_formats = RT_FORMAT_SAV_COMP,
+                .rows = 4,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label = "Double-precision variable",
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "SAS7BDAT RLE and RDC compression",
+                .test_formats = RT_FORMAT_SAS7BDAT_COMP,
+                .rows = 10,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label = "Double-precision variable",
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -100.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_system_missing = 1 },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 0.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 0.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 0.0 } },
+
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 0.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 0.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 0.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 0.0 } }
+                        }
+                    },
+
+                    {
+                        .name = "VAR2",
+                        .type = READSTAT_TYPE_STRING,
+                        .label = "String variable",
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "spaces->        <-- here" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "spaces->                             <-- here" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "blah" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "blahblahblahblahblah" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "blahblahblahblahblahblahblahblahbba" } },
+
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "blahblahblahsafhuweyeoyraewayfeawopyfhewuhafeywfdhsfdsaf" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "atsyms->@@@@@@@@<--FFFFFFFFFFFFFFFFFFFFFFFFFF" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "atsyms->@@@@@@@@@@@@@@@@@@@@@@@@@@@@@<--FFFFF" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "jiafojdsaufwejfiewnfiabfiuaewbfiuwhfeiuwfuienawuifnwauiefnhfuiwheufhwfuiewfjwuifewuif" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "Fchars->GGGGGGGGGGGGGGGGGGGGGGGGGGGGG<-- here" } }
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Long strings and string refs",
+        .tests = {
+            {
+                .label = "25x-byte strings in SAV",
+                .test_formats = RT_FORMAT_SAV,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "VAR252",
+                        .type = READSTAT_TYPE_STRING,
+                        .display_width = 252,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = 
+                                { .string_value = /* 252 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "01"
+                                }
+                            }
+                        }
+                    },
+
+                    {
+                        .name = "VAR253",
+                        .type = READSTAT_TYPE_STRING,
+                        .display_width = 253,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = 
+                                { .string_value = /* 253 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "012"
+                                }
+                            }
+                        }
+                    },
+
+                    {
+                        .name = "VAR254",
+                        .type = READSTAT_TYPE_STRING,
+                        .display_width = 254,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = 
+                                { .string_value = /* 254 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123"
+                                }
+                            }
+                        }
+                    },
+
+                    {
+                        .name = "VAR255",
+                        .type = READSTAT_TYPE_STRING,
+                        .display_width = 255,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = 
+                                { .string_value = /* 255 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "01234"
+                                }
+                            }
+                        }
+                    },
+
+                    {
+                        .name = "VAR256",
+                        .type = READSTAT_TYPE_STRING,
+                        .display_width = 256,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = 
+                                { .string_value = /* 256 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "012345"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "300-byte string in SAV, new DTA, and SAS7BDAT",
+                .test_formats = RT_FORMAT_DTA_117_AND_NEWER | RT_FORMAT_SAV | RT_FORMAT_SAS7BDAT,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = 
+                                { .string_value = /* 300 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                /* At this boundary, a segment is allocated but is unused due to Very Long String math. */
+                /* See: https://github.com/WizardMac/ReadStat/issues/241 */
+                .label = "75x-byte strings in SAV",
+                .test_formats = RT_FORMAT_SAV,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "VAR756",
+                        .type = READSTAT_TYPE_STRING,
+                        .display_width = 756,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v =
+                                { .string_value = /* 756 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "012345"
+                                }
+                            }
+                        }
+                    },
+                    {
+                        .name = "VAR757",
+                        .type = READSTAT_TYPE_STRING,
+                        .display_width = 757,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v =
+                                { .string_value = /* 757 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456"
+                                }
+                            }
+                        }
+                    },
+                    {
+                        .name = "VAR758",
+                        .type = READSTAT_TYPE_STRING,
+                        .display_width = 758,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v =
+                                { .string_value = /* 758 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "01234567"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                /* See: https://github.com/WizardMac/ReadStat/issues/260 */
+                .label = "757-byte strings + double values in SAV",
+                .test_formats = RT_FORMAT_SAV,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "aaaaa2",
+                        .label = "x",
+                        .type = READSTAT_TYPE_STRING,
+                        .display_width = 757,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v =
+                                { .string_value = /* 757 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456"
+                                }
+                            }
+                        }
+                    },
+                    {
+                        .name = "y",
+                        .label = "y",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.0 } } },
+                    }
+                }
+            },
+            {
+                .label = "Four 1024-byte strings in SAS7BDAT", /* Test 4096+ byte rows */
+                .test_formats = RT_FORMAT_SAS7BDAT,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = 
+                                { .string_value = /* 1024 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123"
+                                }
+                            }
+                        }
+                    },
+
+                    {
+                        .name = "VAR2",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = 
+                                { .string_value = /* 1024 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123"
+                                }
+                            }
+                        }
+                    },
+
+                    {
+                        .name = "VAR3",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = 
+                                { .string_value = /* 1024 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123"
+                                }
+                            }
+                        }
+                    },
+
+                    {
+                        .name = "VAR4",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = 
+                                { .string_value = /* 1024 bytes long */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "String refs in new DTA",
+                .test_formats = RT_FORMAT_DTA_117_AND_NEWER,
+                .string_refs_count = 3,
+                .string_refs = {
+                    "Hello",
+                    "Goodbye",
+                    "Hello again"
+                },
+                .rows = 2,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_STRING_REF,
+                        .values = {
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 0 } },
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 1 } }
+                        }
+                    },
+
+                    {
+                        .name = "var2",
+                        .type = READSTAT_TYPE_STRING_REF,
+                        .values = {
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 2 } },
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 0 } }
+                        }
+                    }
+                }
+            },
+
+            {
+                /* The missing value is written as the empty (0,0) reference */
+                .label = "Empty string ref in new DTA",
+                .test_formats = RT_FORMAT_DTA_117_AND_NEWER,
+                .string_refs_count = 1,
+                .string_refs = {
+                    "Hello"
+                },
+                .rows = 2,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_STRING_REF,
+                        .values = {
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_system_missing = 1, .v = { .double_value = NAN } }
+                        }
+                    }
+                }
+            },
+
+            {
+                /* A registered ref that never appears in the data cannot be
+                 * written (Stata forbids it) or dropped (the map is already
+                 * written), so the writer reports it */
+                .label = "Unused string ref in new DTA",
+                .write_error = READSTAT_ERROR_UNUSED_STRING_REF,
+                .test_formats = RT_FORMAT_DTA_117_AND_NEWER,
+                .string_refs_count = 2,
+                .string_refs = {
+                    "Hello",
+                    "Never inserted"
+                },
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_STRING_REF,
+                        .values = {
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 0 } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "Empty SAS file with metadata spill-over beyond first page",
+                .test_formats = RT_FORMAT_SAS7BDAT,
+                .rows = 0,
+                .columns = {
+                    { .name = "one_of_many_long_column_names_1", .label = "Label for column 1", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_2", .label = "Label for column 2", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_3", .label = "Label for column 3", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_4", .label = "Label for column 4", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_5", .label = "Label for column 5", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_6", .label = "Label for column 6", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_7", .label = "Label for column 7", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_8", .label = "Label for column 8", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_9", .label = "Label for column 9", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_10", .label = "Label for column 10", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_11", .label = "Label for column 11", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_12", .label = "Label for column 12", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_13", .label = "Label for column 13", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_14", .label = "Label for column 14", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_15", .label = "Label for column 15", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_16", .label = "Label for column 16", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_17", .label = "Label for column 17", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_18", .label = "Label for column 18", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_19", .label = "Label for column 19", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING },
+                    { .name = "one_of_many_long_column_names_20", .label = "Label for column 20", .format = "$CHAR8.", .type = READSTAT_TYPE_STRING }
+                }
+            }
+        }
+    },
+    {
+        .label = "ASCII tests",
+        .tests = {
+            {
+                .label = "Alphanumeric",
+                .test_formats = RT_FORMAT_ALL,
+                .rows = 3,
+                .columns = {
+                    { 
+                        .name = "VAR1",
+                        .label = "String variable",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "abcdefghijklmnopqrstuvwxyz" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "0123456789" } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "Symbol characters",
+                .test_formats = RT_FORMAT_ALL,
+                .rows = 10,
+                .columns = {
+                    { 
+                        .name = "VAR1",
+                        .label = "String variable",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "!@#" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "$%^" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "&*()" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "`~" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "-=_+" } },
+
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "[]{}" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = ";:" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "'\"" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "<>,./?" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "\\|" } }
+                        }
+                    }
+                }
+            }
+        }
+    },
+            
+    {
+        .label = "UTF-8 tests",
+        .tests = {
+            {
+                .label = "UTF-8 value",
+                .test_formats = RT_FORMAT_DTA_118_AND_NEWER | RT_FORMAT_SAV | RT_FORMAT_SAS7BDAT,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "Stra" "\xc3\x9f" "e" } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "UTF-8 column name",
+                .test_formats = RT_FORMAT_SAV,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "stra" "\xc3\x9f" "e",
+                        .type = READSTAT_TYPE_DOUBLE
+                    },
+                    { /* https://github.com/WizardMac/ReadStat/issues/206 */
+                        .name = "\xd7\x95\xd7\xaa\xd7\xa7_\xd7\x91",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "UTF-8 column label",
+                .test_formats = RT_FORMAT_DTA_118_AND_NEWER | RT_FORMAT_SAV | RT_FORMAT_SAS7BDAT,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "strasse",
+                        .label = "Stra" "\xc3\x9f" "e",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "UTF-8 value label",
+                .test_formats = RT_FORMAT_DTA_118_AND_NEWER,
+                .rows = 0,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "somelbl",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 6 } },
+                                .label = "F" "\xc3\xbc" "nf"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .label_set = "somelbl"
+                    }
+                }
+            }
+        }
+    },
+    {
+        .label = "Illegal column names",
+        .tests = {
+            {
+                .label = "Column name begins with number",
+                .write_error = READSTAT_ERROR_NAME_BEGINS_WITH_ILLEGAL_CHARACTER,
+                .test_formats = RT_FORMAT_DTA | RT_FORMAT_SAS | RT_FORMAT_SAV,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "1var",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "Column name contains dollar sign",
+                .write_error = READSTAT_ERROR_NAME_CONTAINS_ILLEGAL_CHARACTER,
+                .test_formats = RT_FORMAT_DTA | RT_FORMAT_SAS,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "var$",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA column name is a reserved word",
+                .write_error = READSTAT_ERROR_NAME_IS_RESERVED_WORD,
+                .test_formats = RT_FORMAT_DTA,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "double",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA column name is a reserved pattern",
+                .write_error = READSTAT_ERROR_NAME_IS_RESERVED_WORD,
+                .test_formats = RT_FORMAT_DTA,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "str123",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA 13-byte column name is too long",
+                .write_error = READSTAT_ERROR_NAME_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_DTA_108_AND_OLDER,
+                .columns = {
+                    {
+                        .name = "VAR1234567890",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA 34-byte column name is too long",
+                .write_error = READSTAT_ERROR_NAME_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_DTA,
+                .columns = {
+                    {
+                        .name = "VAR1234567890123456789012345678901",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "SAS column name is a reserved word",
+                .write_error = READSTAT_ERROR_NAME_IS_RESERVED_WORD,
+                .test_formats = RT_FORMAT_SAS,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "_NUMERIC_",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "SAS column names differ only in case",
+                .write_error = READSTAT_ERROR_DUPLICATE_VARIABLE_NAME,
+                .test_formats = RT_FORMAT_SAS,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "name",
+                        .type = READSTAT_TYPE_STRING
+                    },
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_DOUBLE
+                    },
+                    {
+                        .name = "Name",
+                        .type = READSTAT_TYPE_STRING
+                    }
+                }
+            },
+            {
+                .label = "SAS column name is too long",
+                .write_error = READSTAT_ERROR_NAME_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_SAS,
+                .columns = {
+                    {
+                        .name = "VAR123456789012345678901234567890",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "XPORT v5 column name is too long",
+                .write_error = READSTAT_ERROR_NAME_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_XPORT_5,
+                .columns = {
+                    {
+                        .name = "VAR123456",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "POR column name is too long",
+                .write_error = READSTAT_ERROR_NAME_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_POR,
+                .columns = {
+                    {
+                        .name = "VAR123456789",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "POR column name starts with number",
+                .write_error = READSTAT_ERROR_NAME_BEGINS_WITH_ILLEGAL_CHARACTER,
+                .test_formats = RT_FORMAT_POR,
+                .columns = {
+                    {
+                        .name = "1VAR",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "POR column name has lower-case letter",
+                .write_error = READSTAT_ERROR_NAME_CONTAINS_ILLEGAL_CHARACTER,
+                .test_formats = RT_FORMAT_POR,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "SAV column name is a reserved word",
+                .write_error = READSTAT_ERROR_NAME_IS_RESERVED_WORD,
+                .test_formats = RT_FORMAT_SAV,
+                .columns = {
+                    {
+                        .name = "ALL",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "SAV column name contains punctuation",
+                .write_error = READSTAT_ERROR_NAME_CONTAINS_ILLEGAL_CHARACTER,
+                .test_formats = RT_FORMAT_SAV,
+                .columns = {
+                    {
+                        .name = "VAR!",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "DTA column name limits",
+        .tests = {
+            {
+                .label = "DTA 33-byte column name is too long",
+                .write_error = READSTAT_ERROR_NAME_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_DTA,
+                .columns = {
+                    {
+                        .name = "VAR123456789012345678901234567890",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA 32-byte column name",
+                .test_formats = RT_FORMAT_DTA_110_AND_NEWER,
+                .columns = {
+                    {
+                        .name = "VAR12345678901234567890123456789",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA 9-byte column name is too long",
+                .write_error = READSTAT_ERROR_NAME_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_DTA_108_AND_OLDER,
+                .columns = {
+                    {
+                        .name = "VAR123456",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA 8-byte column name",
+                .test_formats = RT_FORMAT_DTA,
+                .columns = {
+                    {
+                        .name = "VAR12345",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA 32-character UTF-8 column name in 64 bytes",
+                .test_formats = RT_FORMAT_DTA_118_AND_NEWER,
+                .columns = {
+                    {
+                        .name = RT_UTF8_SZ32,
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA 33-character UTF-8 column name is too long",
+                .write_error = READSTAT_ERROR_NAME_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_DTA_118_AND_NEWER,
+                .columns = {
+                    {
+                        .name = RT_UTF8_SZ32 "\xc3\x9f",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA 32-character UTF-8 column name in 33 bytes",
+                .test_formats = RT_FORMAT_DTA_118_AND_NEWER,
+                .columns = {
+                    {
+                        .name = "VAR1234567890123456789012345678" "\xc3\x9f",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA column name str1abc is not reserved",
+                .test_formats = RT_FORMAT_DTA,
+                .columns = {
+                    {
+                        .name = "str1abc",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA column name strL is reserved",
+                .write_error = READSTAT_ERROR_NAME_IS_RESERVED_WORD,
+                .test_formats = RT_FORMAT_DTA,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "strL",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA column name str2045 is reserved",
+                .write_error = READSTAT_ERROR_NAME_IS_RESERVED_WORD,
+                .test_formats = RT_FORMAT_DTA,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "str2045",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA empty column name",
+                .write_error = READSTAT_ERROR_NAME_IS_ZERO_LENGTH,
+                .test_formats = RT_FORMAT_DTA,
+                .rows = 0,
+                .columns_count = 1,
+                .columns = {
+                    {
+                        .name = "",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Variable labels",
+        .tests = {
+            {
+                .label = "XPORT long variable label",
+                .test_formats = RT_FORMAT_XPORT_8,
+                .columns = {
+                    { .name = "VAR1", .label = "This is a variable label that is longer than 40 bytes!" }
+                }
+            },
+            {
+                .label = "DTA 81-byte variable label is too long",
+                .write_error = READSTAT_ERROR_LABEL_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_DTA,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label = "This variable label is eighty-one bytes long, one more than Stata's limit XXXXXXX"
+                    }
+                }
+            },
+            {
+                .label = "DTA 80-byte variable label",
+                .test_formats = RT_FORMAT_DTA_108_AND_NEWER,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label = "This variable label is exactly eighty bytes long, which is Stata's limit XXXXXXX"
+                    }
+                }
+            },
+            {
+                .label = "DTA 32-byte variable label is too long for ancient formats",
+                .write_error = READSTAT_ERROR_LABEL_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_DTA_105_AND_OLDER,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label = "Thirty-two byte variable label!!"
+                    }
+                }
+            },
+            {
+                .label = "DTA 81-byte data set label is too long, one more than Stata's limit XXXXXXXXXXXXX",
+                .write_error = READSTAT_ERROR_LABEL_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_DTA,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "DTA 80-byte data set label, which is exactly Stata's limit XXXXXXXXXXXXXXXXXXXXX",
+                .test_formats = RT_FORMAT_DTA_108_AND_NEWER,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Display widths",
+        .tests = {
+            {
+                .label = "Display width",
+                .test_formats = RT_FORMAT_SPSS | RT_FORMAT_DTA | RT_FORMAT_XPORT,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .display_width = 12 },
+                    { .name = "VAR2", .type = READSTAT_TYPE_DOUBLE, .display_width = 100 }
+                }
+            },
+            {
+                /* POR is excluded: it has no display width record, and the A
+                 * format width must equal the string width */
+                .label = "String display width",
+                .test_formats = RT_FORMAT_SAV | RT_FORMAT_DTA | RT_FORMAT_XPORT,
+                .columns = {
+                    { .name = "VAR3", .type = READSTAT_TYPE_STRING, .display_width = 255 },
+                    { .name = "VAR4", .type = READSTAT_TYPE_STRING, .display_width = 1000 }
+                }
+            },
+        },
+    },
+
+    {
+        .label = "Formats",
+        .tests = {
+            {
+                .label = "SPSS basic formats",
+                .test_formats = RT_FORMAT_SPSS,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "F6.4" },
+                    { .name = "VAR2", .type = READSTAT_TYPE_DOUBLE, .format = "F8.2" },
+                    { .name = "VAR3", .type = READSTAT_TYPE_STRING, .format = "A12", .user_width = 12 }
+                }
+            },
+            {
+                .label = "SPSS bad format",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_SPSS,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "BARF6.4" }
+                }
+            },
+            {
+                .label = "SPSS date formats",
+                .test_formats = RT_FORMAT_SPSS,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "DATE11" },
+                    { .name = "VAR2", .type = READSTAT_TYPE_DOUBLE, .format = "TIME10" },
+                    { .name = "VAR3", .type = READSTAT_TYPE_DOUBLE, .format = "DATETIME15" },
+                    { .name = "VAR4", .type = READSTAT_TYPE_DOUBLE, .format = "ADATE10" },
+                    { .name = "VAR5", .type = READSTAT_TYPE_DOUBLE, .format = "JDATE10" },
+                    { .name = "VAR6", .type = READSTAT_TYPE_DOUBLE, .format = "DTIME10" },
+                    { .name = "VAR7", .type = READSTAT_TYPE_DOUBLE, .format = "EDATE10" },
+                    { .name = "VAR8", .type = READSTAT_TYPE_DOUBLE, .format = "SDATE10" }
+                }
+            },
+            {
+                .label = "SPSS calendar formats",
+                .test_formats = RT_FORMAT_SPSS,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "WKDAY11" },
+                    { .name = "VAR2", .type = READSTAT_TYPE_DOUBLE, .format = "MONTH11" },
+                    { .name = "VAR3", .type = READSTAT_TYPE_DOUBLE, .format = "MOYR11" },
+                    { .name = "VAR4", .type = READSTAT_TYPE_DOUBLE, .format = "QYR11" },
+                    { .name = "VAR5", .type = READSTAT_TYPE_DOUBLE, .format = "WKYR11" }
+                }
+            },
+            {
+                .label = "SPSS extended formats",
+                .test_formats = RT_FORMAT_SPSS,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "AHEX6.4" },
+                    { .name = "VAR2", .type = READSTAT_TYPE_DOUBLE, .format = "COMMA6.4" },
+                    { .name = "VAR3", .type = READSTAT_TYPE_DOUBLE, .format = "Z10" },
+                    { .name = "VAR4", .type = READSTAT_TYPE_DOUBLE, .format = "N10" },
+                    { .name = "VAR5", .type = READSTAT_TYPE_DOUBLE, .format = "E10" },
+                    { .name = "VAR6", .type = READSTAT_TYPE_DOUBLE, .format = "PCT10" },
+                    { .name = "VAR7", .type = READSTAT_TYPE_DOUBLE, .format = "DOT10" }
+                }
+            },
+            {
+                .label = "SPSS CC formats",
+                .test_formats = RT_FORMAT_SPSS,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "CCA10" },
+                    { .name = "VAR2", .type = READSTAT_TYPE_DOUBLE, .format = "CCB10" },
+                    { .name = "VAR3", .type = READSTAT_TYPE_DOUBLE, .format = "CCC10" },
+                    { .name = "VAR4", .type = READSTAT_TYPE_DOUBLE, .format = "CCD10" },
+                    { .name = "VAR5", .type = READSTAT_TYPE_DOUBLE, .format = "CCE10" }
+                }
+            },
+            {
+                .label = "SPSS currency formats",
+                .test_formats = RT_FORMAT_SPSS,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "DOLLAR6.2" },
+                    { .name = "VAR2", .type = READSTAT_TYPE_DOUBLE, .format = "IB6.2" },
+                    { .name = "VAR3", .type = READSTAT_TYPE_DOUBLE, .format = "PIBHEX9" },
+                    { .name = "VAR4", .type = READSTAT_TYPE_DOUBLE, .format = "P9" },
+                    { .name = "VAR5", .type = READSTAT_TYPE_DOUBLE, .format = "PIB9" },
+                    { .name = "VAR6", .type = READSTAT_TYPE_DOUBLE, .format = "PK9" },
+                    { .name = "VAR7", .type = READSTAT_TYPE_DOUBLE, .format = "RB9" },
+                    { .name = "VAR8", .type = READSTAT_TYPE_DOUBLE, .format = "RBHEX9" }
+                }
+            },
+            {
+                .label = "DTA formats",
+                .test_formats = RT_FORMAT_DTA,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "%6.4g" },
+                    { .name = "VAR2", .type = READSTAT_TYPE_STRING, .format = "%20s" }
+                }
+            },
+            {
+                .label = "DTA 12-byte format does not fit a 12-byte field",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_DTA_111_AND_OLDER,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "%tcDDmonCCYY" }
+                }
+            },
+            {
+                .label = "DTA 12-byte format",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "%tcDDmonCCYY" }
+                }
+            },
+            {
+                .label = "DTA 11-byte format",
+                .test_formats = RT_FORMAT_DTA_105_AND_NEWER,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "%tdDD_Mon_Y" }
+                }
+            },
+            {
+                .label = "SAS formats",
+                .test_formats = RT_FORMAT_SAS,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "10.3", .label_set = "10.3" },
+                    { .name = "VAR2", .type = READSTAT_TYPE_STRING, .format = "$CHAR3.", .label_set = "$CHAR3." }
+                }
+            },
+            {
+                .label = "SAS7BDAT format without width",
+                .test_formats = RT_FORMAT_SAS7BDAT,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "DOLLAR.", .informat = "BEST." },
+                    { .name = "VAR2", .type = READSTAT_TYPE_STRING, .format = "$UPCASE.", .informat = "$CHAR." },
+                }
+            },
+            {
+                .label = "SAS 32-character format names",
+                .test_formats = RT_FORMAT_SAS7BDAT | RT_FORMAT_XPORT_8,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEF12.2" },
+                    { .name = "VAR2", .type = READSTAT_TYPE_STRING, .format = "$ABCDEFGHIJKLMNOPQRSTUVWXYZABCDE8." },
+                }
+            },
+            {
+                .label = "SAS informats",
+                .test_formats = RT_FORMAT_SAS7BDAT | RT_FORMAT_XPORT_8,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .informat = "10.3" },
+                    { .name = "VAR2", .type = READSTAT_TYPE_STRING, .informat = "$CHAR3." }
+                }
+            },
+            {
+                .label = "SAS long format",
+                .test_formats = RT_FORMAT_SAS7BDAT | RT_FORMAT_XPORT_8,
+                .columns = {
+                    { .name = "VAR3", .type = READSTAT_TYPE_DOUBLE, .format = "FAKEFORMAT12.8", .label_set = "FAKEFORMAT12.8" }
+                }
+            },
+            {
+                .label = "XPT format parser",
+                .test_formats = RT_FORMAT_XPORT_5 | RT_FORMAT_XPORT_8,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "10.3", .label_set = "10.3" },
+                    { .name = "VAR2", .type = READSTAT_TYPE_DOUBLE, .format = "F", .label_set = "F" },
+                    { .name = "VAR3", .type = READSTAT_TYPE_STRING, .format = "$CHAR3.", .label_set = "$CHAR3." },
+                    { .name = "VAR4", .type = READSTAT_TYPE_STRING, .format = "COMMA10.3", .label_set = "COMMA10.3" },
+                    { .name = "VAR5", .type = READSTAT_TYPE_DOUBLE, .format = "YYQP1.", .label_set = "YYQP1." }
+                }
+            },
+            {
+                .label = "SAS format with two dots",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_SAS,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "10.3.", .label_set = "10.3." }
+                }
+            },
+            {
+                .label = "SAS character format with digits",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_SAS,
+                .columns = {
+                    { .name = "VAR2", .type = READSTAT_TYPE_STRING, .format = "$CHAR3.1", .label_set = "$CHAR3.1" }
+                }
+            },
+            {
+                .label = "SAS format with negative digits",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_SAS,
+                .columns = {
+                    { .name = "VAR3", .type = READSTAT_TYPE_DOUBLE, .format = "YYQ-1", .label_set = "YYQ-1" }
+                }
+            },
+            {
+                .label = "SAS7BDAT format with digits but no width",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_SAS7BDAT,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = ".2", .label_set = ".2" }
+                }
+            },
+            {
+                .label = "Too long SAS7BDAT format name",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_SAS7BDAT,
+                .columns = {
+                    { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE, .format = "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFG12.2" }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "SAV string widths",
+        .tests = {
+            {
+                .label = "SAV value longer than declared width",
+                .write_error = READSTAT_ERROR_STRING_VALUE_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_SAV,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 10,
+                        .values = {
+                            /* 12 bytes: fits the 16-byte storage width but not the declared width */
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "0123456789AB" } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "SAV very long string value longer than declared width",
+                .write_error = READSTAT_ERROR_STRING_VALUE_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_SAV,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 300,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v =
+                                { .string_value = /* 304 bytes: equal to the segmented storage width */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "SAV very long string value at declared width",
+                .test_formats = RT_FORMAT_SAV,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 300,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v =
+                                { .string_value = /* 300 bytes */
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789" "0123456789"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "SAV zero-width string",
+                .write_error = READSTAT_ERROR_BAD_STRING_WIDTH,
+                .test_formats = RT_FORMAT_SAV,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .zero_width = 1
+                    }
+                }
+            }
+        }
+    },
+    {
+        .label = "DTA string widths",
+        .tests = {
+            {
+                .label = "DTA string width over 128 in old formats",
+                .write_error = READSTAT_ERROR_BAD_STRING_WIDTH,
+                .test_formats = RT_FORMAT_DTA_110_AND_OLDER,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 129
+                    }
+                }
+            },
+            {
+                .label = "DTA string width over 244",
+                .write_error = READSTAT_ERROR_BAD_STRING_WIDTH,
+                .test_formats = RT_FORMAT_DTA_114_AND_OLDER,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 245
+                    }
+                }
+            },
+            {
+                .label = "DTA string width of 244",
+                .test_formats = RT_FORMAT_DTA_111 | RT_FORMAT_DTA_114,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 244,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "wide" } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "DTA string width over 2045",
+                .write_error = READSTAT_ERROR_BAD_STRING_WIDTH,
+                .test_formats = RT_FORMAT_DTA_117_AND_NEWER,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 2046
+                    }
+                }
+            },
+            {
+                .label = "DTA string width of 2045",
+                .test_formats = RT_FORMAT_DTA_117_AND_NEWER,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 2045,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "wide" } }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    {
+        .label = "Missing value definitions",
+        .tests = {
+            {
+                .label = "SPSS missing values",
+                .test_formats = RT_FORMAT_SPSS,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .missing_ranges_count = 1,
+                        .missing_ranges= { 
+                            { .lo = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } },
+                              .hi = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } } }
+                        }
+                    },
+                    {
+                        .name = "VAR2",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .missing_ranges_count = 3,
+                        .missing_ranges= { 
+                            { .lo = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } },
+                              .hi = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } } },
+                            { .lo = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -100.0 } },
+                              .hi = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -100.0 } } },
+                            { .lo = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 2.5 } },
+                              .hi = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 2.5 } } }
+                        }
+                    },
+                    {
+                        .name = "VAR3",
+                        .type = READSTAT_TYPE_STRING,
+                        .missing_ranges_count = 1,
+                        .missing_ranges= { 
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "MISSING" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "MISSING" } } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "SPSS missing ranges",
+                .test_formats = RT_FORMAT_SPSS,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .missing_ranges_count = 1,
+                        .missing_ranges = { 
+                            { .lo = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -HUGE_VAL } },
+                              .hi = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -100.0 } } }
+                        }
+                    },
+                    {
+                        .name = "VAR2",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .missing_ranges_count = 1,
+                        .missing_ranges = { 
+                            { .lo = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } },
+                              .hi = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = HUGE_VAL } } }
+                        }
+                    },
+                    {
+                        .name = "VAR3",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .missing_ranges_count = 1,
+                        .missing_ranges = {
+                            { .lo = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -100.0 } },
+                              .hi = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "SAV string missing range",
+                .write_error = READSTAT_ERROR_MISSING_RANGES_NOT_SUPPORTED,
+                .test_formats = RT_FORMAT_SAV,
+                .columns = {
+                    {
+                        .name = "VAR4",
+                        .type = READSTAT_TYPE_STRING,
+                        .missing_ranges_count = 1,
+                        .missing_ranges = {
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "AAA" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "ZZZ" } } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "SAV long string missing range",
+                .write_error = READSTAT_ERROR_MISSING_RANGES_NOT_SUPPORTED,
+                .test_formats = RT_FORMAT_SAV,
+                .columns = {
+                    {
+                        .name = "VAR4",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 20,
+                        .missing_ranges_count = 2,
+                        .missing_ranges = {
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "MISSING" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "MISSING" } } },
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "AAA" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "ZZZ" } } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "SAV too many missing values for short strings",
+                .write_error = READSTAT_ERROR_TOO_MANY_MISSING_VALUE_DEFINITIONS,
+                .test_formats = RT_FORMAT_SAV,
+                .columns = {
+                    {
+                        .name = "VAR4",
+                        .type = READSTAT_TYPE_STRING,
+                        .missing_ranges_count = 4,
+                        .missing_ranges = {
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M0" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M0" } } },
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M1" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M1" } } },
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M2" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M2" } } },
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M3" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M3" } } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "SAV too many missing values for long strings",
+                .write_error = READSTAT_ERROR_TOO_MANY_MISSING_VALUE_DEFINITIONS,
+                .test_formats = RT_FORMAT_SAV,
+                .columns = {
+                    {
+                        .name = "VAR4",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 20,
+                        .missing_ranges_count = 4,
+                        .missing_ranges = {
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M0" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M0" } } },
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M1" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M1" } } },
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M2" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M2" } } },
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M3" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M3" } } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "SAV three missing values for long strings",
+                .test_formats = RT_FORMAT_SAV,
+                .rows = 2,
+                .columns = {
+                    {
+                        .name = "VAR4",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 20,
+                        .missing_ranges_count = 3,
+                        .missing_ranges = {
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M0" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M0" } } },
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M1" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M1" } } },
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M2" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M2" } } }
+                        },
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "M1" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "NOT MISSING" } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "SPSS too many missing ranges",
+                .write_error = READSTAT_ERROR_TOO_MANY_MISSING_VALUE_DEFINITIONS,
+                .test_formats = RT_FORMAT_SPSS,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .missing_ranges_count = 2,
+                        .missing_ranges = { 
+                            { .lo = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.0 } },
+                              .hi = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } } },
+                            { .lo = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -100.0 } },
+                              .hi = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -1.0 } } },
+                        }
+                    }
+                }
+            },
+            {
+                .label = "SPSS missing values for long strings",
+                .test_formats = RT_FORMAT_SPSS,
+                .rows = 3,
+                .columns = {
+                    {
+                        .name = "VAR3",
+                        .type = READSTAT_TYPE_STRING,
+                        .missing_ranges_count = 2,
+                        .missing_ranges= { 
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "MISSING" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "MISSING" } } },
+                            { .lo = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "MISSING2" } },
+                              .hi = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "MISSING2" } } }
+                        },
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "MISSING" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "MISSING2" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "NOT MISSING!!!!!!!!!" } }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    {
+        .label = "Tagged missing values",
+        .tests = {
+            {
+                .label = "SAV tagged missing values",
+                .write_error = READSTAT_ERROR_TAGGED_VALUES_NOT_SUPPORTED,
+                .test_formats = RT_FORMAT_SAV,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'a' } 
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "Old DTA tagged missing values",
+                .write_error = READSTAT_ERROR_TAGGED_VALUES_NOT_SUPPORTED,
+                .test_formats = RT_FORMAT_DTA_111_AND_OLDER,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'a' } 
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "Out-of-range tagged missing values",
+                .write_error = READSTAT_ERROR_TAGGED_VALUE_IS_OUT_OF_RANGE,
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER | RT_FORMAT_SAS,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = '$' } 
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "SAS in-range tagged missing doubles",
+                .test_formats = RT_FORMAT_SAS,
+                .rows = 7,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'A' },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'B' },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'C' },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'X' },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'Y' },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'Z' },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = '_' }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "DTA in-range tagged missing doubles",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .rows = 6,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'a' },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'b' },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'c' },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'x' },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'y' },
+                            { .type = READSTAT_TYPE_DOUBLE, .is_tagged_missing = 1, .tag = 'z' }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "DTA in-range tagged missing floats",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .rows = 6,
+                .columns = {
+                    {
+                        .name = "var2",
+                        .type = READSTAT_TYPE_FLOAT,
+                        .values = { 
+                            { .type = READSTAT_TYPE_FLOAT, .is_tagged_missing = 1, .tag = 'a' },
+                            { .type = READSTAT_TYPE_FLOAT, .is_tagged_missing = 1, .tag = 'b' },
+                            { .type = READSTAT_TYPE_FLOAT, .is_tagged_missing = 1, .tag = 'c' },
+                            { .type = READSTAT_TYPE_FLOAT, .is_tagged_missing = 1, .tag = 'x' },
+                            { .type = READSTAT_TYPE_FLOAT, .is_tagged_missing = 1, .tag = 'y' },
+                            { .type = READSTAT_TYPE_FLOAT, .is_tagged_missing = 1, .tag = 'z' }
+                        }
+                    }
+                }
+            },
+
+            { 
+                .label = "DTA in-range tagged missing int32s",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .rows = 6,
+                .columns = {
+                    {
+                        .name = "var3",
+                        .type = READSTAT_TYPE_INT32,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT32, .is_tagged_missing = 1, .tag = 'a' },
+                            { .type = READSTAT_TYPE_INT32, .is_tagged_missing = 1, .tag = 'b' },
+                            { .type = READSTAT_TYPE_INT32, .is_tagged_missing = 1, .tag = 'c' },
+                            { .type = READSTAT_TYPE_INT32, .is_tagged_missing = 1, .tag = 'x' },
+                            { .type = READSTAT_TYPE_INT32, .is_tagged_missing = 1, .tag = 'y' },
+                            { .type = READSTAT_TYPE_INT32, .is_tagged_missing = 1, .tag = 'z' }
+                        }
+                    }
+                }
+            },
+
+            { 
+                .label = "DTA in-range tagged missing int16s",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .rows = 6,
+                .columns = {
+                    {
+                        .name = "var4",
+                        .type = READSTAT_TYPE_INT16,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT16, .is_tagged_missing = 1, .tag = 'a' },
+                            { .type = READSTAT_TYPE_INT16, .is_tagged_missing = 1, .tag = 'b' },
+                            { .type = READSTAT_TYPE_INT16, .is_tagged_missing = 1, .tag = 'c' },
+                            { .type = READSTAT_TYPE_INT16, .is_tagged_missing = 1, .tag = 'x' },
+                            { .type = READSTAT_TYPE_INT16, .is_tagged_missing = 1, .tag = 'y' },
+                            { .type = READSTAT_TYPE_INT16, .is_tagged_missing = 1, .tag = 'z' }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "DTA in-range tagged missing int8s",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .rows = 6,
+                .columns = {
+                    {
+                        .name = "var5",
+                        .type = READSTAT_TYPE_INT8,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT8, .is_tagged_missing = 1, .tag = 'a' },
+                            { .type = READSTAT_TYPE_INT8, .is_tagged_missing = 1, .tag = 'b' },
+                            { .type = READSTAT_TYPE_INT8, .is_tagged_missing = 1, .tag = 'c' },
+                            { .type = READSTAT_TYPE_INT8, .is_tagged_missing = 1, .tag = 'x' },
+                            { .type = READSTAT_TYPE_INT8, .is_tagged_missing = 1, .tag = 'y' },
+                            { .type = READSTAT_TYPE_INT8, .is_tagged_missing = 1, .tag = 'z' }
+                        }
+                    }
+                }
+            }
+        },
+    },
+
+    {
+        .label = "DTA value label validation",
+        .tests = {
+            {
+                /* Keys of opposite sign near the int32 limits: a subtracting
+                 * comparator overflows and writes val[] out of order */
+                .label = "DTA value labels near the int32 limits",
+                .test_formats = RT_FORMAT_DTA_108_AND_NEWER,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "somelbl",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 3,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 2000000000 } },
+                                .label = "Positive"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = -2000000000 } },
+                                .label = "Negative"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 0 } },
+                                .label = "Zero"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .label_set = "somelbl"
+                    }
+                }
+            },
+
+            {
+                .label = "DTA duplicate value label keys",
+                .write_error = READSTAT_ERROR_DUPLICATE_VALUE_LABEL,
+                .test_formats = RT_FORMAT_DTA,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "somelbl",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 1 } },
+                                .label = "One"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 1 } },
+                                .label = "Uno"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .label_set = "somelbl"
+                    }
+                }
+            },
+
+            {
+                .label = "DTA non-integer value label key",
+                .write_error = READSTAT_ERROR_VALUE_TYPE_MISMATCH,
+                .test_formats = RT_FORMAT_DTA,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "somelbl",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.5 } },
+                                .label = "One and a half"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label_set = "somelbl"
+                    }
+                }
+            },
+
+            {
+                .label = "DTA string value labels",
+                .write_error = READSTAT_ERROR_VALUE_TYPE_MISMATCH,
+                .test_formats = RT_FORMAT_DTA,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "somelbl",
+                        .type = READSTAT_TYPE_STRING,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "A" } },
+                                .label = "Apple"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_STRING,
+                        .label_set = "somelbl"
+                    }
+                }
+            },
+
+            {
+                .label = "DTA 33-character value label name is too long",
+                .write_error = READSTAT_ERROR_NAME_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_DTA,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "lbl123456789012345678901234567890",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 1 } },
+                                .label = "One"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .label_set = "lbl123456789012345678901234567890"
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Value labels",
+        .tests = {
+            {
+                .label = "SAS numeric value labels",
+                .test_formats = RT_FORMAT_SAS7BCAT,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "LabelSet.",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.0 } },
+                                .label = "One"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 2.0 } },
+                                .label = "Two"
+                            },
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "SAS string value labels",
+                .test_formats = RT_FORMAT_SAS7BCAT,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "$StringLabelSet.",
+                        .type = READSTAT_TYPE_STRING,
+                        .value_labels_count = 4,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "1" } },
+                                .label = "One"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "2" } },
+                                .label = "Two"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "elevenchars" } },
+                                .label = "Eleven characters"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "sixteencharsXXXX" } },
+                                .label = "Sixteen characters"
+                            },
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "Multiple SAS label sets",
+                .test_formats = RT_FORMAT_SAS7BCAT,
+                .label_sets_count = 2,
+                .label_sets = {
+                    {
+                        .name = "OneTwo.",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.0 } },
+                                .label = "One"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 2.0 } },
+                                .label = "Two"
+                            }
+                        }
+                    },
+                    {
+                        .name = "ThreeFour.",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 3.0 } },
+                                .label = "Three"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 4.0 } },
+                                .label = "Four"
+                            }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "SAS string value labels with dotted long name",
+                .test_formats = RT_FORMAT_SAS7BCAT,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "$ABCDEFGHIJKLMNOPQRSTUVWXYZABCDE.",
+                        .type = READSTAT_TYPE_STRING,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "A" } },
+                                .label = "Apple"
+                            }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "SAS catalog format name with width",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_SAS7BCAT,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "MYFMT8.",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.0 } },
+                                .label = "One"
+                            }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "SAS catalog format name with width and digits",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_SAS7BCAT,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "MYFMT8.2",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.0 } },
+                                .label = "One"
+                            }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "SAS catalog numeric format with $ name",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_SAS7BCAT,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "$MYFMT.",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.0 } },
+                                .label = "One"
+                            }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "SAS catalog string format without $ name",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_SAS7BCAT,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "MYFMT",
+                        .type = READSTAT_TYPE_STRING,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "A" } },
+                                .label = "Apple"
+                            }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "Too long SAS catalog format name",
+                .write_error = READSTAT_ERROR_BAD_FORMAT_STRING,
+                .test_formats = RT_FORMAT_SAS7BCAT,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFG",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.0 } },
+                                .label = "One"
+                            }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "DTA ancient value labels",
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .test_formats = RT_FORMAT_DTA_104 | RT_FORMAT_DTA_105,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "somelbl",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                /* Codes are int16 in formats 105 and earlier */
+                                .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 40000 } },
+                                .label = "One"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .label_set = "somelbl"
+                    }
+                }
+            },
+            {
+                .label = "DTA integer value labels",
+                .test_formats = RT_FORMAT_DTA,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "somelbl",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 1 } },
+                                .label = "One"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 2 } },
+                                .label = "Two"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .label_set = "somelbl"
+                    },
+                    {
+                        .name = "var2",
+                        .type = READSTAT_TYPE_INT32,
+                        .label_set = "somelbl"
+                    },
+                }
+            },
+
+            {
+                .label = "DTA ancient short value labels",
+                .test_formats = RT_FORMAT_DTA_104 | RT_FORMAT_DTA_105,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "somelbl",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            /* Labels are 8 bytes in formats 105 and earlier */
+                            { .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = -1 } },
+                              .label = "Neg One" },
+
+                            { .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 1 } },
+                              .label = "Pos One" }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .label_set = "somelbl"
+                    }
+                }
+            },
+
+            {
+                .label = "DTA negative value labels",
+                .test_formats = RT_FORMAT_DTA_108_AND_NEWER,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "somelbl",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            { .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = -1 } },
+                              .label = "Negative One" },
+
+                            { .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 1 } },
+                              .label = "Positive One" }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .label_set = "somelbl"
+                    }
+                }
+            },
+
+            {
+                .label = "DTA tagged value labels",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "somelbl",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            { .value = { .type = READSTAT_TYPE_INT32, .is_tagged_missing = 1, .tag = 'a' }, .label = "One" },
+                            { .value = { .type = READSTAT_TYPE_INT32, .is_tagged_missing = 1, .tag = 'b' }, .label = "Two" },
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .label_set = "somelbl"
+                    }
+                }
+            },
+
+            {
+                .label = "DTA unsupported tagged value labels",
+                .write_error = READSTAT_ERROR_TAGGED_VALUES_NOT_SUPPORTED,
+                .test_formats = RT_FORMAT_DTA_111_AND_OLDER,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "somelbl",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            { .value = { .type = READSTAT_TYPE_INT32, .is_tagged_missing = 1, .tag = 'a' }, .label = "One" },
+                            { .value = { .type = READSTAT_TYPE_INT32, .is_tagged_missing = 1, .tag = 'b' }, .label = "Two" },
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .label_set = "somelbl"
+                    }
+                }
+            },
+
+            {
+                .label = "SPSS numeric value labels",
+                .test_formats = RT_FORMAT_SPSS,
+                .label_sets_count = 2,
+                .label_sets = {
+                    {
+                        .name = "labels0",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1 } },
+                                .label = "One"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 2 } },
+                                .label = "Two"
+                            }
+                        }
+                    },
+                    {
+                        .name = "labels1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 3 } },
+                                .label = "Three"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 4 } },
+                                .label = "Four"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label_set = "labels0"
+                    },
+                    {
+                        .name = "VAR2",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .label_set = "labels1"
+                    }
+                }
+            },
+
+            {
+                .label = "SPSS string value labels",
+                .test_formats = RT_FORMAT_SPSS,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "labels0",
+                        .type = READSTAT_TYPE_STRING,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "1" } },
+                                .label = "One"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "2" } },
+                                .label = "Two"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "VAR2",
+                        .type = READSTAT_TYPE_STRING,
+                        .label_set = "labels0"
+                    }
+                }
+            },
+
+            {
+                .label = "SPSS short labels for long values",
+                .test_formats = RT_FORMAT_SPSS,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "labels0",
+                        .type = READSTAT_TYPE_STRING,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "1,000,000" } },
+                                .label = "One million"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "2,000,000" } },
+                                .label = "Two million"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .label_set = "labels0"
+                    }
+                }
+            },
+
+            {
+                .label = "SPSS long labels for short values",
+                .test_formats = RT_FORMAT_SPSS,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "labels0",
+                        .type = READSTAT_TYPE_STRING,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "One" } },
+                                .label = "One"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "Two" } },
+                                .label =
+                                    "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789"
+                                    "0123456789" "0123456789" "0123456789" "0123456789"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "VAR2",
+                        .type = READSTAT_TYPE_STRING,
+                        .label_set = "labels0"
+                    }
+                }
+            },
+
+            {
+                .label = "SAV long string value label key too long",
+                .write_error = READSTAT_ERROR_STRING_VALUE_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_SAV,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "labels0",
+                        .type = READSTAT_TYPE_STRING,
+                        .value_labels_count = 1,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_STRING, .v = { .string_value = "0123456789ABCDEFG" } },
+                                .label = "Too long key"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 9,
+                        .label_set = "labels0"
+                    }
+                }
+            },
+
+            {
+                .label = "SAV INT8 value labels",
+                .test_formats = RT_FORMAT_SAV,
+                .rows = 2,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "labels0",
+                        .type = READSTAT_TYPE_INT8,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 1 } },
+                                .label = "One"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_INT8, .v = { .i8_value = -2 } },
+                                .label = "Minus two"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_INT8,
+                        .label_set = "labels0",
+                        .values = {
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 1 } },
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = -2 } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "SAV INT16 value labels",
+                .test_formats = RT_FORMAT_SAV,
+                .rows = 2,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "labels0",
+                        .type = READSTAT_TYPE_INT16,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = { .type = READSTAT_TYPE_INT16, .v = { .i16_value = 1000 } },
+                                .label = "One thousand"
+                            },
+                            {
+                                .value = { .type = READSTAT_TYPE_INT16, .v = { .i16_value = -2000 } },
+                                .label = "Minus two thousand"
+                            }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_INT16,
+                        .label_set = "labels0",
+                        .values = {
+                            { .type = READSTAT_TYPE_INT16, .v = { .i16_value = 1000 } },
+                            { .type = READSTAT_TYPE_INT16, .v = { .i16_value = -2000 } }
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Out-of-range floating-point values",
+        .tests = {
+            {
+                .label = "DTA out-of-range double value",
+                .test_formats = RT_FORMAT_DTA,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = HUGE_VAL } } 
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "DTA out-of-range float value",
+                .test_formats = RT_FORMAT_DTA,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_FLOAT,
+                        .values = { 
+                            { .type = READSTAT_TYPE_FLOAT, .v = { .float_value = HUGE_VALF } } 
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Out-of-range negative values (DTA)",
+        .tests = {
+            {
+                .label = "DTA int8 below -127",
+                .test_formats = RT_FORMAT_DTA,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT8,
+                        .values = { { .type = READSTAT_TYPE_INT8, .v = { .i8_value = -128 } } }
+                    }
+                }
+            },
+            {
+                .label = "DTA int16 below -32767",
+                .test_formats = RT_FORMAT_DTA,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT16,
+                        .values = { { .type = READSTAT_TYPE_INT16, .v = { .i16_value = INT16_MIN } } }
+                    }
+                }
+            },
+            {
+                .label = "DTA int32 below -2147483647",
+                .test_formats = RT_FORMAT_DTA,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .values = { { .type = READSTAT_TYPE_INT32, .v = { .i32_value = INT32_MIN } } }
+                    }
+                }
+            },
+            {
+                .label = "DTA negative infinity float",
+                .test_formats = RT_FORMAT_DTA,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_FLOAT,
+                        .values = { { .type = READSTAT_TYPE_FLOAT, .v = { .float_value = -HUGE_VALF } } }
+                    }
+                }
+            },
+            {
+                .label = "DTA negative infinity double",
+                .test_formats = RT_FORMAT_DTA,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -HUGE_VAL } } }
+                    }
+                }
+            },
+            {
+                .label = "DTA smallest in-range values",
+                .test_formats = RT_FORMAT_DTA,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT8,
+                        .values = { { .type = READSTAT_TYPE_INT8, .v = { .i8_value = -127 } } }
+                    },
+                    {
+                        .name = "var2",
+                        .type = READSTAT_TYPE_INT16,
+                        .values = { { .type = READSTAT_TYPE_INT16, .v = { .i16_value = -32767 } } }
+                    },
+                    {
+                        .name = "var3",
+                        .type = READSTAT_TYPE_INT32,
+                        .values = { { .type = READSTAT_TYPE_INT32, .v = { .i32_value = -2147483647 } } }
+                    },
+                    {
+                        .name = "var4",
+                        .type = READSTAT_TYPE_FLOAT,
+                        .values = { { .type = READSTAT_TYPE_FLOAT, .v = { .float_value = -1.7e38f } } }
+                    },
+                    {
+                        .name = "var5",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -8.9e307 } } }
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Out-of-range integer values (pre-113 DTA)",
+        .tests = {
+            {
+                .label = "Pre-113 DTA out-of-range int32 value",
+                .test_formats = RT_FORMAT_DTA_111_AND_OLDER,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = DTA_OLD_MAX_INT32+1 } } 
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "Pre-113 DTA in-range int32 value",
+                .test_formats = RT_FORMAT_DTA_111_AND_OLDER,
+                .rows = 1,
+
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = DTA_OLD_MAX_INT32 } } 
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "Pre-113 DTA out-of-range int16 value",
+                .test_formats = RT_FORMAT_DTA_111_AND_OLDER,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT16,
+                        .values = { { .type = READSTAT_TYPE_INT16, .v = { .i16_value = DTA_OLD_MAX_INT16+1 } } }
+                    }
+                }
+            },
+
+            {
+                .label = "Pre-113 DTA in-range int16 value",
+                .test_formats = RT_FORMAT_DTA_111_AND_OLDER,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT16,
+                        .values = { { .type = READSTAT_TYPE_INT16, .v = { .i16_value = DTA_OLD_MAX_INT16 } } }
+                    }
+                }
+            },
+
+            {
+                .label = "Pre-113 DTA out-of-range int8 value",
+                .test_formats = RT_FORMAT_DTA_111_AND_OLDER,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT8,
+                        .values = { { .type = READSTAT_TYPE_INT8, .v = { .i8_value = DTA_OLD_MAX_INT8+1 } } }
+                    }
+                }
+            },
+
+            {
+                .label = "Pre-113 DTA in-range int8 value",
+                .test_formats = RT_FORMAT_DTA_111_AND_OLDER,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT8,
+                        .values = { { .type = READSTAT_TYPE_INT8, .v = { .i8_value = DTA_OLD_MAX_INT8 } } }
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Out-of-range integer values (post-113 DTA)",
+        .tests = {
+            {
+                .label = "Post-113 DTA out-of-range int32 value",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = DTA_113_MAX_INT32+1 } } 
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "Post-113 DTA in-range int32 value",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .rows = 1,
+
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT32,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = DTA_113_MAX_INT32 } } 
+                        }
+                    }
+                }
+            },
+
+            {
+                .label = "Post-113 DTA out-of-range int16 value",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT16,
+                        .values = { { .type = READSTAT_TYPE_INT16, .v = { .i16_value = DTA_113_MAX_INT16+1 } } }
+                    }
+                }
+            },
+
+            {
+                .label = "Post-113 DTA in-range int16 value",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT16,
+                        .values = { { .type = READSTAT_TYPE_INT16, .v = { .i16_value = DTA_113_MAX_INT16 } } }
+                    }
+                }
+            },
+
+            {
+                .label = "Post-113 DTA out-of-range int8 value",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .write_error = READSTAT_ERROR_NUMERIC_VALUE_IS_OUT_OF_RANGE,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT8,
+                        .values = { { .type = READSTAT_TYPE_INT8, .v = { .i8_value = DTA_113_MAX_INT8+1 } } }
+                    }
+                }
+            },
+
+            {
+                .label = "Post-113 DTA in-range int8 value",
+                .test_formats = RT_FORMAT_DTA_114_AND_NEWER,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "var1",
+                        .type = READSTAT_TYPE_INT8,
+                        .values = { { .type = READSTAT_TYPE_INT8, .v = { .i8_value = DTA_113_MAX_INT8 } } }
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Timestamps",
+        .tests = {
+            {
+                .label = "January 2, 1970", /* Windows localtime can't handle negative UNIX timestamps */
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */70, .tm_mon = 0, .tm_mday = 2, .tm_hour = 0, .tm_min = 0 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            },
+
+            {
+                .label = "February 16, 1988",
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */88, .tm_mon = 1, .tm_mday = 16, .tm_hour = 9, .tm_min = 30 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            },
+
+            {
+                .label = "March 14, 1990",
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */90, .tm_mon = 2, .tm_mday = 14, .tm_hour = 15, .tm_min = 15 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            },
+
+            {
+                .label = "April 15, 1995",
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */95, .tm_mon = 3, .tm_mday = 15, .tm_hour = 12, .tm_min = 0 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            },
+
+            {
+                .label = "May 1, 1995",
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */95, .tm_mon = 4, .tm_mday = 1, .tm_hour = 0, .tm_min = 0 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            },
+
+            {
+                .label = "June 6, 1994",
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */94, .tm_mon = 5, .tm_mday = 6, .tm_hour = 5, .tm_min = 30 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            },
+
+            {
+                .label = "July 4, 1976",
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */76, .tm_mon = 6, .tm_mday = 4, .tm_hour = 10, .tm_min = 30 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            },
+
+            {
+                .label = "August 2, 1984",
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */84, .tm_mon = 7, .tm_mday = 2, .tm_hour = 3, .tm_min = 4 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            },
+
+            {
+                .label = "September 20, 1999",
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */99, .tm_mon = 8, .tm_mday = 20, .tm_hour = 3, .tm_min = 4 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            },
+
+            {
+                .label = "October 31, 1992",
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */92, .tm_mon = 9, .tm_mday = 31, .tm_hour = 23, .tm_min = 59 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            },
+
+            {
+                .label = "November 3, 1986",
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */86, .tm_mon = 10, .tm_mday = 3, .tm_hour = 16, .tm_min = 30 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            },
+
+            {
+                .label = "December 25, 2020",
+                .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
+                .timestamp = { .tm_year = /* 19 */120, .tm_mon = 11, .tm_mday = 25, .tm_hour = 6, .tm_min = 0 },
+                .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
+            }
+        }
+    },
+
+    {
+        .label = "Frequency weights",
+        .tests = {
+            {
+                .label = "Good frequency weight",
+                .test_formats = RT_FORMAT_SPSS,
+                .fweight = "VAR1",
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .label = "Double-precision variable",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+
+            {
+                .label = "Non-existent frequency weight",
+                .write_error = READSTAT_ERROR_BAD_FREQUENCY_WEIGHT,
+                .test_formats = RT_FORMAT_SPSS,
+                .fweight = "VAR2",
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .label = "Double-precision variable",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+
+            {
+                .label = "String frequency weight",
+                .write_error = READSTAT_ERROR_BAD_FREQUENCY_WEIGHT,
+                .test_formats = RT_FORMAT_SPSS,
+                .fweight = "VAR1",
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .label = "String variable",
+                        .type = READSTAT_TYPE_STRING
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Bug fixes",
+        .tests = {
+            {
+                .label = "Floating point numbers that may collide with SAS subheader signatures",
+                .test_formats = RT_FORMAT_SAS7BDAT_64BIT,
+                .rows = 4,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 0.0010449746331455659 } },   // F7 F7 F7 F7 F0 1E 51 3F
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -1.3177858745490654e-51 } }, // F9 FF FF FF 00 8E 5F B5
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 4.4841929648653507e-13 } }   // FD FF FF FF 00 8E 5F 3D
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "POR tests",
+        .tests = {
+            {
+                .label = "POR numbers round-trip exactly",
+                .test_formats = RT_FORMAT_POR,
+                .rows = 10,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -0.1234567 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1e19 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1e-75 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.7976931348623157e+308 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 4.9406564584124654e-324 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 0.1 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1.0/3.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 9007199254740994.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 123456789012345678.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -1e300 } }
+                        }
+                    },
+                    { /* written before VAR1 in each row; an overflow from VAR1 would clobber it */
+                        .name = "VAR2",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 7.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 7.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 7.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 7.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 7.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 7.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 7.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 7.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 7.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 7.0 } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "POR string value longer than declared width",
+                .write_error = READSTAT_ERROR_STRING_VALUE_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_POR,
+                .rows = 1,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 4,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "abcdefgh" } }
+                        }
+                    }
+                }
+            },
+            {
+                .label = "POR string width over 255",
+                .write_error = READSTAT_ERROR_STRING_VALUE_IS_TOO_LONG,
+                .test_formats = RT_FORMAT_POR,
+                .rows = 0,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 256
+                    }
+                }
+            },
+            {
+                /* The pound sign is written as '#', which SPSS also uses for
+                 * it, and read back as '#'; the value is not compared but
+                 * the neighboring column must survive the conversion. */
+                .label = "POR non-ASCII string value",
+                .test_formats = RT_FORMAT_POR,
+                .rows = 2,
+                .columns = {
+                    {
+                        .name = "VAR1",
+                        .type = READSTAT_TYPE_STRING,
+                        .user_width = 4,
+                        .skip_value_comparison = 1,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "\xc2\xa3\xc2\xa3\xc2\xa3\xc2\xa3" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "a\xc2\xa3" "b" } }
+                        }
+                    },
+                    {
+                        .name = "VAR2",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 42.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -0.5 } }
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Generic tests",
+        .tests = {
+            {
+                .label = "Generic test file with all column types",
+                .test_formats = RT_FORMAT_ALL,
+                .write_error = READSTAT_OK,
+                .rows = 6,
+                .columns = {
+                    { 
+                        .name = "VAR1",
+                        .label = "Double-precision variable",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .alignment = READSTAT_ALIGNMENT_CENTER,
+                        .measure = READSTAT_MEASURE_SCALE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 100.0 } }, 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 30.0 } }, 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 10.0 } }, 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -3.14159, } }, 
+                            { .type = READSTAT_TYPE_DOUBLE, .is_system_missing = 1, .v = { .double_value = NAN } }, 
+                            { .type = READSTAT_TYPE_DOUBLE, .is_system_missing = 1 },
+                        }
+                    },
+                    { 
+                        .name = "VAR2",
+                        .label = "Single-precision variable",
+                        .type = READSTAT_TYPE_FLOAT,
+                        .alignment = READSTAT_ALIGNMENT_CENTER,
+                        .measure = READSTAT_MEASURE_SCALE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_FLOAT, .v = { .float_value = 30.0 } }, 
+                            { .type = READSTAT_TYPE_FLOAT, .v = { .float_value = 20.0 } }, 
+                            { .type = READSTAT_TYPE_FLOAT, .v = { .float_value = 15.0 } },
+                            { .type = READSTAT_TYPE_FLOAT, .v = { .float_value = 3.14159 } },
+                            { .type = READSTAT_TYPE_FLOAT, .is_system_missing = 1, .v = { .float_value = NAN } },
+                            { .type = READSTAT_TYPE_FLOAT, .is_system_missing = 1 }
+                        }
+                    },
+                    { 
+                        .name = "VAR3",
+                        .label = "Int32 variable",
+                        .type = READSTAT_TYPE_INT32,
+                        .alignment = READSTAT_ALIGNMENT_CENTER,
+                        .measure = READSTAT_MEASURE_SCALE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 30 } },
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 20 } },
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 15 } },
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = -281817 } },
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = DTA_113_MAX_INT32 } },
+                            { .type = READSTAT_TYPE_INT32, .is_system_missing = 1 }
+                        }
+                    },
+                    { 
+                        .name = "VAR4",
+                        .label = "Int16 variable",
+                        .type = READSTAT_TYPE_INT16,
+                        .alignment = READSTAT_ALIGNMENT_CENTER,
+                        .measure = READSTAT_MEASURE_SCALE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT16, .v = { .i16_value = 30 } }, 
+                            { .type = READSTAT_TYPE_INT16, .v = { .i16_value = 20 } }, 
+                            { .type = READSTAT_TYPE_INT16, .v = { .i16_value = 15 } }, 
+                            { .type = READSTAT_TYPE_INT16, .v = { .i16_value = -28117 } },
+                            { .type = READSTAT_TYPE_INT16, .v = { .i16_value = DTA_113_MAX_INT16 } },
+                            { .type = READSTAT_TYPE_INT16, .is_system_missing = 1 }
+                        }
+                    },
+                    { 
+                        .name = "VAR5",
+                        .label = "Int8 variable",
+                        .type = READSTAT_TYPE_INT8,
+                        .alignment = READSTAT_ALIGNMENT_CENTER,
+                        .measure = READSTAT_MEASURE_SCALE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 30 } },
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 20 } },
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 15 } },
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = -28 } },
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = DTA_113_MAX_INT8 } },
+                            { .type = READSTAT_TYPE_INT8, .is_system_missing = 1 }
+                        }
+                    },
+                    { 
+                        .name = "VAR6",
+                        .label = "String variable",
+                        .type = READSTAT_TYPE_STRING,
+                        .alignment = READSTAT_ALIGNMENT_LEFT,
+                        .measure = READSTAT_MEASURE_ORDINAL,
+                        .values = { 
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "Hello" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "Hello" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "Goodbye" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "Goodbye" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "Goodbye" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                        }
+                    },
+                    {
+                        .name = "VAR7",
+                        .label = "Empty string variable",
+                        .type = READSTAT_TYPE_STRING,
+                        .alignment = READSTAT_ALIGNMENT_LEFT,
+                        .measure = READSTAT_MEASURE_ORDINAL,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                        }
+                    }
+                }
+            },
+
+            {
+                /* Stata's ranges exclude these; see "Out-of-range negative values (DTA)" */
+                .label = "Extreme values",
+                .test_formats = RT_FORMAT_SPSS | RT_FORMAT_SAS,
+                .rows = 1,
+                .columns = {
+                    { 
+                        .name = "VAR1",
+                        .label = "Double-precision variable",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -HUGE_VAL } }
+                        }
+                    },
+
+                    { 
+                        .name = "VAR2",
+                        .label = "Single-precision variable",
+                        .type = READSTAT_TYPE_FLOAT,
+                        .values = { 
+                            { .type = READSTAT_TYPE_FLOAT, .v = { .float_value = -HUGE_VALF } }
+                        }
+                    },
+
+                    { 
+                        .name = "VAR3",
+                        .label = "Int32 variable",
+                        .type = READSTAT_TYPE_INT32,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT32, .v = { .i32_value = INT32_MIN } }
+                        }
+                    },
+
+                    { 
+                        .name = "VAR4",
+                        .label = "Int16 variable",
+                        .type = READSTAT_TYPE_INT16,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT16, .v = { .i16_value = INT16_MIN } }
+                        }
+                    },
+
+                    { 
+                        .name = "VAR5",
+                        .label = "Int8 variable",
+                        .type = READSTAT_TYPE_INT8,
+                        .values = { 
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = INT8_MIN } }
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    {
+        .label = "Resource tests",
+        .tests = {
+            {
+                .resource_name = "strl_119.dta",
+                /* DTA 119 strL references use a 3-byte v and 5-byte o */
+                .test_formats = RT_FORMAT_DTA_119,
+                .timestamp = { .tm_year = 117, .tm_mon = 2, .tm_mday = 10, .tm_hour = 14, .tm_min = 23 },
+                .rows = 2,
+                .columns_count = 2,
+                .columns = {
+                    {
+                        .name = "a",
+                        .type = READSTAT_TYPE_INT8,
+                        .format = "%8.0g",
+                        .values = {
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 1 } },
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 2 } }
+                        }
+                    },
+                    {
+                        .name = "s",
+                        .type = READSTAT_TYPE_STRING,
+                        .format = "%9s",
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "third" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "fourth" } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .resource_name = "binary_strl_118.dta",
+                /* DTA binary strL (GSO type 129) does not derail the strL scan */
+                .test_formats = RT_FORMAT_DTA_118,
+                .timestamp = { .tm_year = 117, .tm_mon = 2, .tm_mday = 10, .tm_hour = 14, .tm_min = 23 },
+                .rows = 2,
+                .columns_count = 2,
+                .columns = {
+                    {
+                        .name = "a",
+                        .type = READSTAT_TYPE_INT8,
+                        .format = "%8.0g",
+                        .values = {
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 1 } },
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 2 } }
+                        }
+                    },
+                    {
+                        .name = "s",
+                        .type = READSTAT_TYPE_STRING,
+                        .format = "%9s",
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "bin" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "hello" } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .resource_name = "trailing_blanks_118.dta",
+                /* DTA trailing blanks in str# values are significant */
+                .test_formats = RT_FORMAT_DTA_118,
+                .timestamp = { .tm_year = 117, .tm_mon = 2, .tm_mday = 10, .tm_hour = 14, .tm_min = 23 },
+                .rows = 3,
+                .columns_count = 1,
+                .columns = {
+                    {
+                        .name = "s",
+                        .type = READSTAT_TYPE_STRING,
+                        .format = "%9s",
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "a     " } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "b  " } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .resource_name = "value_labels_108.dta",
+                /* DTA 108 value labels use a 9-byte label name */
+                .test_formats = RT_FORMAT_DTA_108,
+                .label = "Test label",
+                .timestamp = { .tm_year = 117, .tm_mon = 2, .tm_mday = 10, .tm_hour = 14, .tm_min = 23 },
+                .rows = 2,
+                .columns_count = 1,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "yesno",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            { .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 1 } }, .label = "yes" },
+                            { .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 2 } }, .label = "no" }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "a",
+                        .type = READSTAT_TYPE_INT8,
+                        .format = "%8.0g",
+                        .label = "A var",
+                        .label_set = "yesno",
+                        .values = {
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 1 } },
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 2 } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .resource_name = "value_labels_105.dta",
+                /* DTA 105 value labels use the int16 code table layout */
+                .test_formats = RT_FORMAT_DTA_105,
+                .label = "Test label",
+                .timestamp = { .tm_year = 117, .tm_mon = 2, .tm_mday = 10, .tm_hour = 14, .tm_min = 23 },
+                .rows = 2,
+                .columns_count = 1,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "yesno",
+                        .type = READSTAT_TYPE_INT32,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            { .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 1 } }, .label = "yes" },
+                            { .value = { .type = READSTAT_TYPE_INT32, .v = { .i32_value = 2 } }, .label = "no" }
+                        }
+                    }
+                },
+                .columns = {
+                    {
+                        .name = "a",
+                        .type = READSTAT_TYPE_INT8,
+                        .format = "%8.0g",
+                        .label = "A var",
+                        .label_set = "yesno",
+                        .values = {
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 1 } },
+                            { .type = READSTAT_TYPE_INT8, .v = { .i8_value = 2 } }
+                        }
+                    }
+                }
+            },
+            {
+                .resource_name = "datetime.sas7bdat",
+                .table_name = "DATETIME",
+                .test_formats = RT_FORMAT_SAS7BDAT_32BIT_COMP_NONE,
+                .rows = 3,
+                .columns_count = 5,
+                .columns = {
+                    {
+                        .name = "Date1",
+                        .format = "YYMMDD10.",
+                        .informat = "F8.",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 5 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 2 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 5 } }
+                        }
+                    },
+                    {
+                        .name = "Date2",
+                        .format = "DATE7.",
+                        .informat = "F8.",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 3 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 4 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 3 } }
+                        }
+                    },
+                    {
+                        .name = "DateTime",
+                        .format = "DATETIME19.",
+                        .informat = "DATETIME19.",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -8907752836 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 9538991236 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -8907752836 } }
+                        }
+                    },
+                    {
+                        .name = "DateTimeHi",
+                        .format = "DATETIME28.9",
+                        .informat = "23.9",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -8907752836.85477447509766 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 9538991236.85477447509766 } }
+                        }
+                    },
+                    {
+                        .name = "Taiw",
+                        .format = "MINGUO10.",
+                        .informat = "F8.",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = { 
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -17532 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = -17532 } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .resource_name = "compression_type_0x02.sas7bdat",
+                .label = "SAS file with moved uncompressed row",
+                .test_formats = RT_FORMAT_SAS7BDAT_64BIT_COMP_NONE,
+                .rows = 5,
+                .columns_count = 3,
+                .columns = {
+                    {
+                        .name = "id",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 2 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 3 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 4 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 5 } }
+                        }
+                    },
+                    {
+                        .name = "category",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_1" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_2" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_3" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_4" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_5" } }
+                        }
+                    },
+                    {
+                        .name = "payload_to_update",
+                        .type = READSTAT_TYPE_STRING,
+                        .skip_value_comparison = 1
+                    }
+                }
+            },
+
+            {
+                .resource_name = "compression_type_0x06.sas7bdat",
+                .label = "SAS file with moved compressed row",
+                .test_formats = RT_FORMAT_SAS7BDAT_64BIT_COMP_ROWS,
+                .rows = 5,
+                .columns_count = 3,
+                .columns = {
+                    {
+                        .name = "id",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 2 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 3 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 4 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 5 } }
+                        }
+                    },
+                    {
+                        .name = "category",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_1" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_2" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_3" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_4" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_5" } }
+                        }
+                    },
+                    {
+                        .name = "payload_to_update",
+                        .type = READSTAT_TYPE_STRING,
+                        .skip_value_comparison = 1
+                    }
+                }
+            },
+
+            {
+                .resource_name = "compression_type_0x09.sas7bdat",
+                .label = "SAS file with unreferenced uncompressed row",
+                .test_formats = RT_FORMAT_SAS7BDAT_64BIT_COMP_NONE,
+                .rows = 4,
+                .columns_count = 3,
+                .columns = {
+                    {
+                        .name = "id",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 2 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 4 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 5 } }
+                        }
+                    },
+                    {
+                        .name = "category",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_1" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_2" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_4" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_5" } }
+                        }
+                    },
+                    {
+                        .name = "payload_to_update",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .resource_name = "compression_type_0x0d.sas7bdat",
+                .label = "SAS file with unreferenced compressed row",
+                .test_formats = RT_FORMAT_SAS7BDAT_64BIT_COMP_ROWS,
+                .rows = 4,
+                .columns_count = 3,
+                .columns = {
+                    {
+                        .name = "id",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 1 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 2 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 4 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 5 } }
+                        }
+                    },
+                    {
+                        .name = "category",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_1" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_2" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_4" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "CATEGORY_5" } }
+                        }
+                    },
+                    {
+                        .name = "payload_to_update",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "" } }
+                        }
+                    }
+                }
+            },
+
+            {
+                .resource_name = "format_with_default_32bit.sas7bcat",
+                .test_formats = RT_FORMAT_SAS7BCAT_32BIT,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "$YESNO.",
+                        .type = READSTAT_TYPE_STRING,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = {
+                                    .type = READSTAT_TYPE_STRING,
+                                    .v = { .string_value = "Yes, I could not agree more" }
+                                },
+                                .label = "True"
+                            },
+                            {
+                                .value = {
+                                    .type = READSTAT_TYPE_STRING,
+                                    .v = { .string_value = "No, not really" }
+                                },
+                                .label = "False"
+                            }
+                        }
+                    }
+                }
+            },
+
+            {
+                .resource_name = "format_with_default_64bit.sas7bcat",
+                .test_formats = RT_FORMAT_SAS7BCAT_64BIT,
+                .label_sets_count = 1,
+                .label_sets = {
+                    {
+                        .name = "$YESNO.",
+                        .type = READSTAT_TYPE_STRING,
+                        .value_labels_count = 2,
+                        .value_labels = {
+                            {
+                                .value = {
+                                    .type = READSTAT_TYPE_STRING,
+                                    .v = { .string_value = "Yes, I could not agree more" }
+                                },
+                                .label = "True"
+                            },
+                            {
+                                .value = {
+                                    .type = READSTAT_TYPE_STRING,
+                                    .v = { .string_value = "No, not really" }
+                                },
+                                .label = "False"
+                            }
+                        }
+                    }
+                }
+            },
+
+            {
+                .resource_name = "sav_missing_continuations.sav",
+                /* IBM SPSS Modeler omits the continuation records after an
+                 * A16 string, but the case data still holds 16 bytes (#319) */
+                .test_formats = RT_FORMAT_SAV_COMP_ROWS,
+                .label = "SPSS",
+                .rows = 2,
+                .columns_count = 3,
+                .columns = {
+                    {
+                        .name = "num1",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 12.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 213.0 } }
+                        }
+                    },
+                    {
+                        .name = "string1",
+                        .type = READSTAT_TYPE_STRING,
+                        .values = {
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "randomstring1234" } },
+                            { .type = READSTAT_TYPE_STRING, .v = { .string_value = "gamma" } }
+                        }
+                    },
+                    {
+                        .name = "num2",
+                        .type = READSTAT_TYPE_DOUBLE,
+                        .values = {
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 34.0 } },
+                            { .type = READSTAT_TYPE_DOUBLE, .v = { .double_value = 12.0 } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+};

@@ -1,0 +1,175 @@
+name: build
+on: [ push, pull_request ]
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [ clang, gcc, gcc-11, gcc-12, gcc-13, gcc-14 ]
+    steps:
+      - name: Install compiler
+        if: startsWith(matrix.compiler, 'gcc-')
+        run: sudo apt install ${{ matrix.compiler }}
+      - uses: actions/checkout@v6
+      - name: Autoconf
+        run: autoreconf -i -f
+      - name: Configure
+        run: ./configure
+        env:
+          CC: ${{ matrix.compiler }}
+      - name: Make
+        run: make
+      - name: Run tests
+        id: make-check
+        run: make check
+        continue-on-error: true
+      - name: Upload test log
+        if: steps.make-check.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-suite-log-linux-${{ matrix.compiler }}
+          path: test-suite.log
+          retention-days: 5
+      - name: Generate corpus
+        run: make generate_corpus
+      - name: Fail if tests failed
+        if: steps.make-check.outcome == 'failure'
+        run: exit 1
+  macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        compiler: [ clang, gcc ]
+    steps:
+      - name: Install packages
+        run: brew install automake libtool
+      - uses: actions/checkout@v6
+      - name: Autoconf
+        run: autoreconf -i -f
+      - name: Configure
+        run: ./configure
+        env:
+          CC: ${{ matrix.compiler }}
+      - name: Make
+        run: make
+      - name: Run tests
+        id: make-check
+        run: make check
+        continue-on-error: true
+      - name: Upload test log
+        if: steps.make-check.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-suite-log-macos-${{ matrix.compiler }}
+          path: test-suite.log
+          retention-days: 5
+      - name: Generate corpus
+        run: make generate_corpus
+      - name: Fail if tests failed
+        if: steps.make-check.outcome == 'failure'
+        run: exit 1
+  windows_msys:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - msystem: MSYS
+            packages: autotools base-devel gcc libiconv-devel zlib-devel
+          - msystem: MINGW64
+            packages: autotools base-devel mingw-w64-x86_64-gcc mingw-w64-x86_64-libiconv mingw-w64-x86_64-zlib
+          - msystem: UCRT64
+            packages: autotools base-devel mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-libiconv mingw-w64-ucrt-x86_64-zlib
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: ${{ matrix.packages }}
+      - uses: actions/checkout@v6
+      - name: Autoconf
+        run: autoreconf -i -f
+      - name: Configure
+        run: ./configure
+      - name: Make
+        run: make
+      - name: Test
+        id: make-check
+        run: make check
+        continue-on-error: true
+      - name: Upload test log
+        if: steps.make-check.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-suite-log-windows-${{ matrix.msystem }}
+          path: test-suite.log
+          retention-days: 5
+      - name: Fail if tests failed
+        if: steps.make-check.outcome == 'failure'
+        run: exit 1
+  windows_msvc:
+    runs-on: windows-latest
+    env:
+      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}\\vcpkg-cache,readwrite"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compute vcpkg cache key
+        id: vcpkg-key
+        shell: pwsh
+        run: |
+          "key=vcpkg-${{ runner.os }}-$env:ImageVersion-x64-windows-release-${{ hashFiles('vcpkg.json') }}" >> $env:GITHUB_OUTPUT
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/vcpkg-cache
+          key: ${{ steps.vcpkg-key.outputs.key }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      - name: Set up vcpkg at the manifest baseline
+        shell: pwsh
+        run: |
+          # The runner's vcpkg clone may predate the builtin-baseline in
+          # vcpkg.json. vcpkg reads the port version database from the
+          # working tree, so fetching alone is not enough: check out the
+          # baseline and bootstrap the matching vcpkg tool.
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          git -C "$env:VCPKG_INSTALLATION_ROOT" fetch --quiet origin $baseline
+          git -C "$env:VCPKG_INSTALLATION_ROOT" checkout --quiet --force $baseline
+          & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          vcpkg integrate install
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build
+        run: |
+          MSBuild ./VS17/ReadStat.sln /p:Configuration=Release /p:Platform=x64 /p:VcpkgTriplet=x64-windows-release /nologo
+     
+      - name: Test
+        shell: pwsh
+        run: |
+          # pwsh only fails the step on the last command's exit code, so
+          # check each executable explicitly
+          $failed = @()
+          ./VS17/x64/Release/ReadStat_App.exe --version
+          if ($LASTEXITCODE -ne 0) { $failed += "ReadStat_App" }
+          $tests = @("double_decimals", "dta_days", "sav_date", "readstat")
+          foreach ($test in $tests) {
+            Write-Host "Running $test..."
+            & "./VS17/x64/Release/ReadStat_Test_$test.exe"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::$test exited with code $LASTEXITCODE"
+              $failed += $test
+            }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "Failed: $($failed -join ', ')"
+            exit 1
+          }

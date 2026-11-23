@@ -1,0 +1,10 @@
+[package]
+name = "readstat-sys"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+encoding_rs = "0.8"
+
+[build-dependencies]
+cc = "1.2"

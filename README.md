@@ -39,3 +39,10 @@ cargo build --release --bin sas-viewer
 # 产物位置: target\release\sas-viewer.exe
 ```
 或直接通过仓库内置的 `.github/workflows/release.yml` 在 GitHub Actions 上自动产出 Windows `.exe` 与 macOS `.app`。
+
+## 贡献者（Contributors）
+感谢以下开发者为本项目做出的贡献：
+
+- [@allensrj](https://github.com/allensrj) — 项目发起人、核心架构与功能开发
+- [@wtwang1998](https://github.com/wtwang1998) (wentao) — Windows 拖拽冻结根因分析（#1）、默认渲染器修复（#2）及事件循环架构 RFC（#3）
+

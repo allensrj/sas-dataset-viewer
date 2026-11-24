@@ -698,7 +698,9 @@ impl ApplicationHandler for SoftAppRunner {
     ) {
         if let (Some(window), Some(egui_state)) = (self.window.as_ref(), self.egui_state.as_mut()) {
             let resp = egui_state.on_window_event(window, &event);
-            if resp.repaint {
+            // Pure window translation does not invalidate the client buffer; skip redundant
+            // full-frame CPU rasterization on Moved to avoid saturating a CPU core during drag.
+            if resp.repaint && !matches!(event, WindowEvent::Moved(_)) {
                 window.request_redraw();
             }
         }

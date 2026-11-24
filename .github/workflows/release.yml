@@ -22,6 +22,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build Windows standalone exe
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release --bin sas-viewer
 
       - name: Package Windows executable

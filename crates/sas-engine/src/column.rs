@@ -366,6 +366,39 @@ impl ColumnarTable {
         self.columns.iter().map(|c| c.approx_memory_bytes()).sum()
     }
 
+    /// Estimate balanced, uniform default column pixel width (matching v0.2.0 feel),
+    /// considering header name, truncated label (up to 18 units), and sampled cell values.
+    /// Used on initial table load and by "重置所有列宽".
+    pub fn estimate_default_column_width_px(&self, col: usize) -> f32 {
+        let meta = &self.variables[col];
+        let header_units = display_char_units(&meta.name)
+            .max(display_char_units(&meta.label).min(18));
+        let sample_limit = 256usize;
+
+        let data_units = match &self.columns[col] {
+            ColumnData::String(sc) => sc.estimate_max_display_chars(sample_limit),
+            ColumnData::Numeric(nc) => {
+                let n = nc.len();
+                if n == 0 {
+                    4
+                } else {
+                    let step = (n / sample_limit).max(1);
+                    let mut max_u = 0usize;
+                    let mut i = 0;
+                    while i < n {
+                        let s = nc.format_cell(i, meta);
+                        max_u = max_u.max(display_char_units(&s));
+                        i += step;
+                    }
+                    max_u
+                }
+            }
+        };
+
+        let units = header_units.max(data_units);
+        ((units as f32) * 7.8 + 30.0).clamp(96.0, 220.0)
+    }
+
     /// Estimate optimal column pixel width from actual cell data values.
     /// Clamped strictly to [6, 30] ASCII character units (roughly 64px .. 246px) per user spec:
     /// very short values (e.g. "65") keep a clean ~6-char floor, while very long text is capped at ~30 chars.

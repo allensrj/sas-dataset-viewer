@@ -2,6 +2,7 @@ pub mod column;
 pub mod loader;
 pub mod query;
 pub mod sas_format;
+pub mod search;
 pub mod stats;
 pub mod types;
 pub mod writer;
@@ -13,6 +14,7 @@ pub use query::{
     FilterOp, SortKey, ViewQuery,
 };
 pub use sas_format::{format_missing_tag, format_numeric_value, format_plain_number, parse_numeric_or_date_input, parse_sas_format};
+pub use search::{search_table_cells, CellSearchMatcher, CellSearchOptions};
 pub use stats::{compute_column_stats, ColumnStats, FreqEntry, NumericStats, StringStats};
 pub use types::{DatasetMetadata, EncodingChoice, SasDateKind, SasFormatKind, VarType, VariableMeta};
 pub use writer::{SasWriter, WriterCell, WriterColumnSpec};
@@ -289,11 +291,121 @@ mod tests {
             _ => panic!("expected numeric stats"),
         }
 
-        // 8. Auto-fit width respects [6, 30] ASCII char bounds strictly from data
+        // 8. Auto-fit width respects [6, 30] ASCII char bounds strictly from data,
+        // while default/reset width uses balanced header+data uniform sizing (>= 96px).
         let w_sex = table.estimate_column_width_px(2, 6, 30, true); // "M"/"F" -> floor 6 chars (~63.6px)
         assert!((w_sex - (6.0 * 7.6 + 18.0)).abs() < 0.1);
+        let w_sex_default = table.estimate_default_column_width_px(2);
+        assert!(w_sex_default >= 96.0 && w_sex_default > w_sex);
         let w_arm = table.estimate_column_width_px(1, 6, 30, true); // <= 30 chars (~246px)
         assert!(w_arm <= 30.0 * 7.6 + 18.1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_vscode_cell_search_strings_numerics_whole_word_case_regex() {
+        let tmp = std::env::temp_dir();
+        let path = tmp.join("test_sas_viewer_search.sas7bdat");
+        write_sample_file(&path, SasFormatKind::Sas7bdat, 120);
+        let table = load_dataset_sync(&path, EncodingChoice::Utf8).expect("load");
+        let vis_rows: Vec<u32> = (0..120).collect();
+        let vis_cols: Vec<usize> = (0..table.variables.len()).collect();
+
+        // 1. Case-insensitive vs Case-sensitive (Aa) on string ("placebo" vs "Placebo")
+        let m_ci = CellSearchMatcher::compile("placebo", CellSearchOptions::default()).unwrap();
+        let (hits_ci, _) = search_table_cells(&table, &vis_rows, &vis_cols, &m_ci, 1000);
+        assert_eq!(hits_ci.len(), 40);
+
+        let m_cs_miss = CellSearchMatcher::compile(
+            "placebo",
+            CellSearchOptions {
+                match_case: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (hits_cs_miss, _) = search_table_cells(&table, &vis_rows, &vis_cols, &m_cs_miss, 1000);
+        assert_eq!(hits_cs_miss.len(), 0);
+
+        let m_cs_hit = CellSearchMatcher::compile(
+            "Placebo",
+            CellSearchOptions {
+                match_case: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (hits_cs_hit, _) = search_table_cells(&table, &vis_rows, &vis_cols, &m_cs_hit, 1000);
+        assert_eq!(hits_cs_hit.len(), 40);
+
+        // 2. Whole-word (全字): "M" matches SEX="M" (col 2), NOT "100mg" in ARM (col 1)!
+        let m_ww = CellSearchMatcher::compile(
+            "M",
+            CellSearchOptions {
+                whole_word: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (hits_ww, _) = search_table_cells(&table, &vis_rows, &vis_cols, &m_ww, 1000);
+        assert!(!hits_ww.is_empty());
+        assert!(hits_ww.iter().all(|&(_, col)| col == 2));
+
+        // 3. Numeric search: "10" with whole_word matches AVAL=10.00 (col 5, row 0), NOT 10.15 or 100mg!
+        let m_num_ww = CellSearchMatcher::compile(
+            "10",
+            CellSearchOptions {
+                whole_word: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (hits_num_ww, _) = search_table_cells(&table, &vis_rows, &vis_cols, &m_num_ww, 1000);
+        assert!(hits_num_ww.contains(&(0, 5)));
+        assert!(!hits_num_ww.contains(&(1, 5))); // row 1 AVAL is 10.15 -> must NOT match whole-word "10"!
+
+        // 4. Numeric substring search: "10.15" finds row 1 col 5, and "2025-01-01" finds date col 4!
+        let m_dec = CellSearchMatcher::compile("10.15", CellSearchOptions::default()).unwrap();
+        let (hits_dec, _) = search_table_cells(&table, &vis_rows, &vis_cols, &m_dec, 1000);
+        assert_eq!(hits_dec, vec![(1, 5)]);
+
+        let m_date = CellSearchMatcher::compile("2025-01-01", CellSearchOptions::default()).unwrap();
+        let (hits_date, _) = search_table_cells(&table, &vis_rows, &vis_cols, &m_date, 1000);
+        assert!(hits_date.contains(&(0, 4)));
+
+        // 5. Numeric SAS missing tag ".A"
+        let m_miss = CellSearchMatcher::compile(
+            ".A",
+            CellSearchOptions {
+                whole_word: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (hits_miss, _) = search_table_cells(&table, &vis_rows, &vis_cols, &m_miss, 1000);
+        assert_eq!(hits_miss, vec![(1, 3), (51, 3), (101, 3)]);
+
+        // 6. Regex search (.*): "^STUDY01-0000(01|02)$" and invalid regex error
+        let m_re = CellSearchMatcher::compile(
+            r"^STUDY01-0000(01|02)$",
+            CellSearchOptions {
+                use_regex: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (hits_re, _) = search_table_cells(&table, &vis_rows, &vis_cols, &m_re, 1000);
+        assert_eq!(hits_re, vec![(0, 0), (1, 0)]);
+
+        assert!(CellSearchMatcher::compile(
+            "[unclosed",
+            CellSearchOptions {
+                use_regex: true,
+                ..Default::default()
+            },
+        )
+        .is_err());
 
         let _ = std::fs::remove_file(&path);
     }

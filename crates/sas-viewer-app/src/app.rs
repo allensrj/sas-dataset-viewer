@@ -20,6 +20,7 @@ pub struct SasViewerApp {
     active_tab_id: Option<u64>,
     right_tab: RightTab,
     focus_var_search: bool,
+    focus_cell_search: bool,
     status_toast: Option<(String, std::time::Instant)>,
 }
 
@@ -38,6 +39,7 @@ impl SasViewerApp {
             active_tab_id: None,
             right_tab: RightTab::Variables,
             focus_var_search: false,
+            focus_cell_search: false,
             status_toast: None,
         };
 
@@ -207,14 +209,18 @@ impl SasViewerApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let typing_in_text = ctx.wants_keyboard_input();
 
-        let (cmd_b, cmd_backslash, cmd_f, cmd_c, cmd_w) = ctx.input(|i| {
+        let (cmd_b, cmd_backslash, cmd_f, cmd_shift_f, cmd_c, cmd_w, f3_next, f3_prev) = ctx.input(|i| {
             let cmd = i.modifiers.command;
+            let shift = i.modifiers.shift;
             (
                 cmd && i.key_pressed(Key::B),
                 cmd && i.key_pressed(Key::Backslash),
-                cmd && i.key_pressed(Key::F),
+                cmd && !shift && i.key_pressed(Key::F),
+                cmd && shift && i.key_pressed(Key::F),
                 cmd && i.key_pressed(Key::C),
                 cmd && i.key_pressed(Key::W),
+                !shift && i.key_pressed(Key::F3),
+                shift && i.key_pressed(Key::F3),
             )
         });
 
@@ -230,6 +236,20 @@ impl SasViewerApp {
             self.config.right_panel_open = true;
             self.right_tab = RightTab::Variables;
             self.focus_var_search = true;
+        }
+        if cmd_shift_f {
+            self.focus_cell_search = true;
+        }
+        if f3_next || f3_prev {
+            if let Some(id) = self.active_tab_id {
+                if let Some(tab) = self.tabs.get_mut(&id) {
+                    if f3_prev {
+                        tab.search_prev();
+                    } else {
+                        tab.search_next();
+                    }
+                }
+            }
         }
         if cmd_c && !typing_in_text {
             if let Some(id) = self.active_tab_id {
@@ -517,20 +537,34 @@ impl SasViewerApp {
                             ui.separator();
                             if ui
                                 .button("自适应列宽")
-                                .on_hover_text("批量调整所有可见列宽至数据实际长度（范围约 6~30 字符）")
+                                .on_hover_text("批量调整所有可见列宽至数据实际长度（约 6~30 字符）")
                                 .clicked()
                             {
                                 tab.auto_fit_all_visible_columns();
                             }
+                            if ui
+                                .button("重置列宽")
+                                .on_hover_text("恢复均匀平衡的默认列宽")
+                                .clicked()
+                            {
+                                tab.reset_all_column_widths();
+                            }
 
                             ui.separator();
-                            // Dataset cell-value Search bar + Prev / Next
+                            // VS Code-style Dataset Cell Search bar (strings + numbers + Aa / Whole Word / Regex)
+                            ui.spacing_mut().item_spacing.x = 3.0;
                             ui.label(RichText::new("Search").strong().size(12.0).color(pal.text_muted));
                             let resp = ui.add(
                                 egui::TextEdit::singleline(&mut tab.search_query)
-                                    .hint_text("检索单元格值...")
-                                    .desired_width(145.0),
+                                    .hint_text("查找字符/数值... (Ctrl+Shift+F)")
+                                    .desired_width(142.0),
                             );
+                            if self.focus_cell_search {
+                                resp.request_focus();
+                                self.focus_cell_search = false;
+                            }
+
+                            let mut search_dirty = resp.changed();
                             if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                                 if ui.input(|i| i.modifiers.shift) {
                                     tab.search_prev();
@@ -540,29 +574,78 @@ impl SasViewerApp {
                                 resp.request_focus();
                             } else if resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
                                 tab.clear_cell_search();
+                                resp.surrender_focus();
+                                search_dirty = false;
+                            }
+
+                            if search_option_toggle(
+                                ui,
+                                tab.search_options.match_case,
+                                "Aa",
+                                "区分大小写 (Match Case)",
+                                &pal,
+                            ) {
+                                tab.search_options.match_case = !tab.search_options.match_case;
+                                search_dirty = true;
+                            }
+                            if search_option_toggle(
+                                ui,
+                                tab.search_options.whole_word,
+                                "全字",
+                                "全字匹配 (Match Whole Word)\n字符串按完整词边界匹配；数值按精确值匹配（如搜 65 匹配 65 / 65.00，不匹配 65.3 或 165）",
+                                &pal,
+                            ) {
+                                tab.search_options.whole_word = !tab.search_options.whole_word;
+                                search_dirty = true;
+                            }
+                            if search_option_toggle(
+                                ui,
+                                tab.search_options.use_regex,
+                                ".*",
+                                "使用正则表达式 (Regular Expression)\n支持 ^ $ . * + ? | () [] \\d \\w \\s \\b",
+                                &pal,
+                            ) {
+                                tab.search_options.use_regex = !tab.search_options.use_regex;
+                                search_dirty = true;
+                            }
+
+                            if search_dirty {
+                                if tab.search_query.is_empty() {
+                                    tab.clear_cell_search();
+                                } else {
+                                    tab.run_cell_search(true);
+                                }
                             }
 
                             if !tab.search_query.is_empty()
-                                && ui.small_button("×").on_hover_text("清空搜索").clicked()
+                                && ui.small_button("×").on_hover_text("清空搜索 (Esc)").clicked()
                             {
                                 tab.clear_cell_search();
                             }
                             if ui
-                                .small_button("↑ 上一个")
-                                .on_hover_text("跳转到上一个匹配单元格 (Shift+Enter)")
+                                .small_button("↑")
+                                .on_hover_text("上一个匹配 (Shift+Enter / Shift+F3)")
                                 .clicked()
                             {
                                 tab.search_prev();
                             }
                             if ui
-                                .small_button("↓ 下一个")
-                                .on_hover_text("跳转到下一个匹配单元格 (Enter)")
+                                .small_button("↓")
+                                .on_hover_text("下一个匹配 (Enter / F3)")
                                 .clicked()
                             {
                                 tab.search_next();
                             }
 
-                            if !tab.search_executed_query.is_empty() {
+                            if let Some(err) = &tab.search_error {
+                                ui.label(
+                                    RichText::new("正则无效")
+                                        .size(11.0)
+                                        .strong()
+                                        .color(Color32::from_rgb(205, 70, 70)),
+                                )
+                                .on_hover_text(err);
+                            } else if !tab.search_executed_query.is_empty() {
                                 let match_txt = if tab.search_matches.is_empty() {
                                     "0 匹配".to_string()
                                 } else {
@@ -575,7 +658,7 @@ impl SasViewerApp {
                                         .monospace()
                                         .size(11.2)
                                         .color(if tab.search_matches.is_empty() {
-                                            Color32::from_rgb(200, 75, 75)
+                                            Color32::from_rgb(205, 70, 70)
                                         } else {
                                             pal.accent
                                         }),
@@ -744,18 +827,32 @@ impl SasViewerApp {
                 });
         }
 
-        // Right Panel: Variables (2-col) / Statistics (selectable values) / Shortcuts
+        // Right Panel: Variables (4-col) / Statistics (selectable values) / Shortcuts
+        // Rendered inside a clipped, layout-isolated child UI so inner widgets NEVER fight or bounce
+        // back the user's dragged panel width!
         if self.config.right_panel_open {
             egui::SidePanel::right("right_inspector_panel")
                 .resizable(true)
-                .default_width(320.0)
-                .width_range(220.0..=580.0)
+                .default_width(360.0)
+                .width_range(160.0..=760.0)
                 .show(ctx, |ui| {
+                    let panel_rect = ui.available_rect_before_wrap();
+                    // Keep parent min_rect strictly <= panel_rect width so SidePanel always obeys dragged width
+                    ui.allocate_exact_size(
+                        egui::Vec2::new((panel_rect.width() - 2.0).max(0.0), panel_rect.height()),
+                        egui::Sense::hover(),
+                    );
+                    let mut child_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(panel_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    child_ui.set_clip_rect(panel_rect);
                     let active_tab = self
                         .active_tab_id
                         .and_then(|id| self.tabs.get_mut(&id));
                     show_right_panel(
-                        ui,
+                        &mut child_ui,
                         active_tab,
                         &mut self.right_tab,
                         &mut self.focus_var_search,
@@ -870,4 +967,25 @@ impl SasViewerApp {
                 }
             });
     }
+}
+
+/// Compact VS Code-style toggle button for Search options (`Aa`, `全字`, `.*`).
+fn search_option_toggle(
+    ui: &mut Ui,
+    active: bool,
+    label: &str,
+    tooltip: &str,
+    pal: &AppPalette,
+) -> bool {
+    let text = RichText::new(label)
+        .size(11.0)
+        .strong()
+        .color(if active { pal.accent } else { pal.text_muted });
+    let mut btn = egui::Button::new(text).small();
+    if active {
+        btn = btn
+            .fill(pal.accent_soft)
+            .stroke(egui::Stroke::new(1.0, pal.accent));
+    }
+    ui.add(btn).on_hover_text(tooltip).clicked()
 }

@@ -1,7 +1,7 @@
 use sas_engine::{
     build_multi_cell_filter, compute_column_stats, compute_visible_rows, load_dataset_streaming,
-    parse_numeric_or_date_input, ColumnData, ColumnStats, ColumnarTable, EncodingChoice, FilterOp,
-    LoadEvent, StringColumn, VarType, ViewQuery,
+    parse_numeric_or_date_input, search_table_cells, CellSearchMatcher, CellSearchOptions,
+    ColumnStats, ColumnarTable, EncodingChoice, FilterOp, LoadEvent, VarType, ViewQuery,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 
-const MAX_SEARCH_MATCHES: usize = 10_000;
+const MAX_SEARCH_MATCHES: usize = 20_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightTab {
@@ -109,10 +109,15 @@ pub struct DatasetTabState {
     pub stats_selected_indices: BTreeSet<usize>,
     pub stats_anchor_idx: Option<usize>,
 
-    // In-dataset cell value search (Top toolbar Search box + Prev/Next)
+    // In-dataset cell value search (VS Code-style Search bar + Aa / Whole Word / Regex + Prev/Next)
     pub search_query: String,
+    pub search_options: CellSearchOptions,
     pub search_executed_query: String,
+    pub search_executed_options: CellSearchOptions,
+    pub search_matcher: Option<CellSearchMatcher>,
+    pub search_error: Option<String>,
     pub search_filter_version: u64,
+    pub search_vis_cols: Vec<usize>,
     pub search_matches: Vec<(usize, usize)>, // (visible_row_idx, orig_col_idx)
     pub search_current_idx: Option<usize>,
     pub search_truncated: bool,
@@ -163,8 +168,13 @@ impl DatasetTabState {
             stats_selected_indices: BTreeSet::new(),
             stats_anchor_idx: None,
             search_query: String::new(),
+            search_options: CellSearchOptions::default(),
             search_executed_query: String::new(),
+            search_executed_options: CellSearchOptions::default(),
+            search_matcher: None,
+            search_error: None,
             search_filter_version: u64::MAX,
+            search_vis_cols: Vec::new(),
             search_matches: Vec::new(),
             search_current_idx: None,
             search_truncated: false,
@@ -279,9 +289,9 @@ impl DatasetTabState {
         if need_init_cols {
             self.column_order = (0..ncols).collect();
             self.column_visible = vec![true; ncols];
-            // Reasonable initial width strictly in [6, 26] chars (~64px .. 216px)
+            // Balanced, uniform default widths (matching v0.2.0) on initial open
             self.column_widths = (0..ncols)
-                .map(|c| table.estimate_column_width_px(c, 6, 26, false))
+                .map(|c| table.estimate_default_column_width_px(c))
                 .collect();
             if ncols > 0 && self.selected_var.is_none() {
                 self.selected_var = Some(0);
@@ -323,7 +333,7 @@ impl DatasetTabState {
         }
 
         // Re-run active value search if user had an active search query
-        if !self.search_query.trim().is_empty() && !self.search_executed_query.is_empty() {
+        if !self.search_query.is_empty() && !self.search_executed_query.is_empty() {
             self.run_cell_search(false);
         } else {
             self.search_matches.clear();
@@ -611,6 +621,14 @@ impl DatasetTabState {
         }
     }
 
+    /// Clear sorting only (restoring initial dataset row order while preserving active filters).
+    pub fn clear_sorts_only(&mut self) {
+        if !self.query.sorts.is_empty() {
+            self.query.sorts.clear();
+            self.recompute_view();
+        }
+    }
+
     pub fn hide_all_variables(&mut self) {
         for v in &mut self.column_visible {
             *v = false;
@@ -680,29 +698,43 @@ impl DatasetTabState {
         }
     }
 
+    /// Reset all columns back to balanced, uniform default widths (v0.2.0 style).
     pub fn reset_all_column_widths(&mut self) {
         if let Some(table) = &self.table {
             for col_idx in 0..self.column_widths.len() {
-                self.column_widths[col_idx] = table.estimate_column_width_px(col_idx, 6, 26, false);
+                self.column_widths[col_idx] = table.estimate_default_column_width_px(col_idx);
             }
         }
     }
 
-    // ===== Fast In-Dataset Cell Value Search =====
+    // ===== VS Code-Style In-Dataset Cell Value Search =====
 
     pub fn clear_cell_search(&mut self) {
         self.search_query.clear();
         self.search_executed_query.clear();
+        self.search_matcher = None;
+        self.search_error = None;
+        self.search_vis_cols.clear();
         self.search_matches.clear();
         self.search_current_idx = None;
         self.search_truncated = false;
     }
 
-    /// Search across visible rows × visible columns for case-insensitive substring match.
+    fn search_needs_refresh(&self) -> bool {
+        self.search_executed_query != self.search_query
+            || self.search_executed_options != self.search_options
+            || self.search_filter_version != self.filter_version
+            || self.search_vis_cols != self.visible_columns()
+    }
+
+    /// Search across visible rows × visible columns (strings, numbers, formatted dates, SAS missing)
+    /// honoring VS Code options: Match Case (`Aa`), Whole Word (`全字`), and Regex (`.*`).
     pub fn run_cell_search(&mut self, jump_to_first: bool) {
-        let needle_raw = self.search_query.trim().to_string();
-        if needle_raw.is_empty() {
+        if self.search_query.is_empty() {
             self.search_executed_query.clear();
+            self.search_matcher = None;
+            self.search_error = None;
+            self.search_vis_cols.clear();
             self.search_matches.clear();
             self.search_current_idx = None;
             self.search_truncated = false;
@@ -712,84 +744,52 @@ impl DatasetTabState {
             return;
         };
 
-        let needle = needle_raw.to_lowercase();
         let vis_cols = self.visible_columns();
-        let mut matches: Vec<(usize, usize)> = Vec::new();
-        let mut truncated = false;
+        match CellSearchMatcher::compile(&self.search_query, self.search_options) {
+            Ok(matcher) => {
+                let (matches, truncated) = search_table_cells(
+                    &table,
+                    &self.visible_rows,
+                    &vis_cols,
+                    &matcher,
+                    MAX_SEARCH_MATCHES,
+                );
+                self.search_executed_query = self.search_query.clone();
+                self.search_executed_options = self.search_options;
+                self.search_filter_version = self.filter_version;
+                self.search_vis_cols = vis_cols;
+                self.search_matcher = Some(matcher);
+                self.search_error = None;
+                self.search_matches = matches;
+                self.search_truncated = truncated;
 
-        // Precompute dictionary masks for Dict string columns so scanning 200k rows is near-instant!
-        enum ColMatcher<'a> {
-            Dict(&'a [u32], Vec<bool>),
-            Flat(&'a StringColumn),
-            Numeric(usize),
-        }
-
-        let matchers: Vec<(usize, ColMatcher<'_>)> = vis_cols
-            .iter()
-            .filter_map(|&c| {
-                let col = table.columns.get(c)?;
-                let m = match col {
-                    ColumnData::String(sc) => match sc {
-                        StringColumn::Dict { dict, ids, .. } => {
-                            let mask: Vec<bool> = dict
-                                .iter()
-                                .map(|s| !s.is_empty() && s.to_lowercase().contains(&needle))
-                                .collect();
-                            if !mask.iter().any(|&b| b) {
-                                return None; // Skip entire column in O(1)!
-                            }
-                            ColMatcher::Dict(ids, mask)
-                        }
-                        StringColumn::Flat { .. } => ColMatcher::Flat(sc),
-                    },
-                    ColumnData::Numeric(_) => ColMatcher::Numeric(c),
-                };
-                Some((c, m))
-            })
-            .collect();
-
-        'outer: for (vis_r, &orig_u32) in self.visible_rows.iter().enumerate() {
-            let orig_r = orig_u32 as usize;
-            for &(col_idx, ref matcher) in &matchers {
-                let hit = match matcher {
-                    ColMatcher::Dict(ids, mask) => mask[ids[orig_r] as usize],
-                    ColMatcher::Flat(sc) => sc.get_str(orig_r).to_lowercase().contains(&needle),
-                    ColMatcher::Numeric(c) => table
-                        .format_cell(orig_r, *c)
-                        .to_lowercase()
-                        .contains(&needle),
-                };
-                if hit {
-                    matches.push((vis_r, col_idx));
-                    if matches.len() >= MAX_SEARCH_MATCHES {
-                        truncated = true;
-                        break 'outer;
-                    }
+                if self.search_matches.is_empty() {
+                    self.search_current_idx = None;
+                } else if jump_to_first {
+                    self.jump_to_search_match(0);
+                } else {
+                    self.search_current_idx = Some(0);
                 }
             }
-        }
-
-        self.search_executed_query = needle_raw;
-        self.search_filter_version = self.filter_version;
-        self.search_matches = matches;
-        self.search_truncated = truncated;
-
-        if self.search_matches.is_empty() {
-            self.search_current_idx = None;
-        } else if jump_to_first {
-            self.jump_to_search_match(0);
-        } else {
-            self.search_current_idx = Some(0);
+            Err(err) => {
+                self.search_executed_query = self.search_query.clone();
+                self.search_executed_options = self.search_options;
+                self.search_filter_version = self.filter_version;
+                self.search_vis_cols = vis_cols;
+                self.search_matcher = None;
+                self.search_error = Some(err);
+                self.search_matches.clear();
+                self.search_current_idx = None;
+                self.search_truncated = false;
+            }
         }
     }
 
     pub fn search_next(&mut self) {
-        if self.search_query.trim().is_empty() {
+        if self.search_query.is_empty() {
             return;
         }
-        if self.search_executed_query != self.search_query.trim()
-            || self.search_filter_version != self.filter_version
-        {
+        if self.search_needs_refresh() {
             self.run_cell_search(true);
             return;
         }
@@ -805,12 +805,10 @@ impl DatasetTabState {
     }
 
     pub fn search_prev(&mut self) {
-        if self.search_query.trim().is_empty() {
+        if self.search_query.is_empty() {
             return;
         }
-        if self.search_executed_query != self.search_query.trim()
-            || self.search_filter_version != self.filter_version
-        {
+        if self.search_needs_refresh() {
             self.run_cell_search(true);
             return;
         }

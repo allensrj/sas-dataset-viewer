@@ -9,7 +9,7 @@ use sas_engine::{
     ColumnData, FilterOp, VarType, MISSING_VALID,
 };
 
-const ROW_NUM_WIDTH: f32 = 58.0;
+const ROW_NUM_WIDTH: f32 = 62.0;
 const HDR_NAME_HEIGHT: f32 = 24.0;
 const HDR_LABEL_HEIGHT: f32 = 20.0;
 const HEADER_TOTAL_HEIGHT: f32 = HDR_NAME_HEIGHT + HDR_LABEL_HEIGHT;
@@ -236,12 +236,23 @@ pub fn show_data_grid(
         );
     }
 
-    // 1. Frozen Corner Header (#)
+    // 1. Frozen Corner Header (# / 行号) — left-click restores initial dataset row order (clears sorts)
     let corner_rect = Rect::from_min_size(
         grid_rect.min,
         Vec2::new(ROW_NUM_WIDTH, HEADER_TOTAL_HEIGHT),
     );
-    ui.painter().rect_filled(corner_rect, 0.0, pal.bg_header_name);
+    let corner_resp = ui.interact(corner_rect, Id::new(("corner_hdr", tab.id)), Sense::click());
+    let has_sorts = !tab.query.sorts.is_empty();
+    let corner_bg = if has_sorts && corner_resp.hovered() {
+        pal.accent_soft
+    } else {
+        pal.bg_header_name
+    };
+    if has_sorts && corner_resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    ui.painter().rect_filled(corner_rect, 0.0, corner_bg);
     ui.painter().line_segment(
         [
             Pos2::new(corner_rect.left(), corner_rect.top() + HDR_NAME_HEIGHT),
@@ -260,9 +271,9 @@ pub fn show_data_grid(
     ui.painter().text(
         Pos2::new(corner_rect.center().x, corner_rect.top() + HDR_NAME_HEIGHT * 0.5),
         Align2::CENTER_CENTER,
-        "#",
-        FontId::proportional(12.0),
-        pal.text_muted,
+        if has_sorts { "# ↺" } else { "#" },
+        FontId::proportional(11.8),
+        if has_sorts { pal.accent } else { pal.text_muted },
     );
     ui.painter().text(
         Pos2::new(
@@ -270,13 +281,30 @@ pub fn show_data_grid(
             corner_rect.top() + HDR_NAME_HEIGHT + HDR_LABEL_HEIGHT * 0.5,
         ),
         Align2::CENTER_CENTER,
-        "行号",
+        if has_sorts { "原序" } else { "行号" },
         FontId::proportional(10.5),
-        pal.text_muted,
+        if has_sorts { pal.accent } else { pal.text_muted },
     );
 
-    let corner_resp = ui.interact(corner_rect, Id::new(("corner_hdr", tab.id)), Sense::click());
+    if corner_resp.clicked() && has_sorts {
+        tab.clear_sorts_only();
+    }
+
+    let corner_tip = if has_sorts {
+        "行号显示数据集打开时的原始顺序\n点击此处恢复数据集初始行序（清除排序，保留筛选）\n右键查看更多表操作"
+    } else {
+        "行号显示数据集打开时的原始顺序（当前为初始顺序）\n右键查看更多表操作"
+    };
+    corner_resp.clone().on_hover_text(corner_tip);
+
     corner_resp.context_menu(|ui| {
+        if has_sorts {
+            if ui.button("恢复数据集初始行序（清除排序）").clicked() {
+                tab.clear_sorts_only();
+                ui.close_menu();
+            }
+            ui.separator();
+        }
         if ui.button("批量自适应所有可见列宽").clicked() {
             tab.auto_fit_all_visible_columns();
             ui.close_menu();
@@ -326,11 +354,7 @@ pub fn show_data_grid(
     let current_search_cell: Option<(usize, usize)> = tab
         .search_current_idx
         .and_then(|i| tab.search_matches.get(i).copied());
-    let active_search_lower: Option<String> = if !tab.search_executed_query.is_empty() {
-        Some(tab.search_executed_query.to_lowercase())
-    } else {
-        None
-    };
+    let active_search_matcher = tab.search_matcher.clone();
 
     let mut body_ui = ui.new_child(
         egui::UiBuilder::new()
@@ -429,12 +453,12 @@ pub fn show_data_grid(
                         }
                     };
 
-                    // Search highlight (current match vs other visible matches)
+                    // Search highlight (current match vs other visible matches, using exact compiled matcher!)
                     let is_cur_search = current_search_cell == Some((vis_r, orig_col));
                     let is_any_search = is_cur_search
-                        || active_search_lower
-                            .as_deref()
-                            .map(|needle| !text.is_empty() && text.to_lowercase().contains(needle))
+                        || active_search_matcher
+                            .as_ref()
+                            .map(|m| m.matches_cell(&table, orig_row, orig_col))
                             .unwrap_or(false);
 
                     let is_primary_sel = tab.selected_cell == Some((vis_r, orig_col));
@@ -829,7 +853,9 @@ pub fn show_data_grid(
         if tab.selected_cell.map(|(r, _)| r == vis_r).unwrap_or(false) {
             rn_painter.rect_filled(r_rect, 0.0, pal.bg_selected_col_hdr);
         }
-        let num_text = format!("{}", vis_r + 1);
+        // Display original 1-based dataset observation number (_N_) so sort order is always transparent!
+        let orig_row_num = tab.visible_rows[vis_r] as usize + 1;
+        let num_text = format!("{}", orig_row_num);
         rn_painter.text(
             Pos2::new(r_rect.right() - 8.0, r_rect.center().y),
             Align2::RIGHT_CENTER,
@@ -978,29 +1004,50 @@ pub fn show_data_grid(
             deferred_resize = Some((orig_col, new_w));
         }
 
-        let interact_rect = Rect::from_min_max(
+        // Split interaction: clicking the Variable Name tier sorts & drags;
+        // clicking the Variable Label tier ONLY selects the variable (no sorting, preventing accidental clicks!).
+        let name_interact_rect = Rect::from_min_max(
             Pos2::new(x0 + 2.0, hdr_clip.top()),
+            Pos2::new((x1 - 4.0).max(x0 + 3.0), hdr_clip.top() + HDR_NAME_HEIGHT),
+        )
+        .intersect(hdr_clip);
+        let label_interact_rect = Rect::from_min_max(
+            Pos2::new(x0 + 2.0, hdr_clip.top() + HDR_NAME_HEIGHT),
             Pos2::new((x1 - 4.0).max(x0 + 3.0), hdr_clip.bottom()),
         )
         .intersect(hdr_clip);
-        let hdr_resp = ui.interact(
-            interact_rect,
-            Id::new(("col_hdr", tab.id, orig_col)),
+
+        let name_resp = ui.interact(
+            name_interact_rect,
+            Id::new(("col_hdr_name", tab.id, orig_col)),
             Sense::click_and_drag(),
         );
+        let label_resp = ui.interact(
+            label_interact_rect,
+            Id::new(("col_hdr_label", tab.id, orig_col)),
+            Sense::click(),
+        );
 
-        if hdr_resp.clicked() {
+        if name_resp.hovered() && tab.dragging_col.is_none() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        if name_resp.clicked() {
             tab.selected_var = Some(orig_col);
             let shift = ui.input(|i| i.modifiers.shift);
             deferred_sort = Some((orig_col, shift));
         }
 
-        if hdr_resp.drag_started() {
+        if label_resp.clicked() {
+            tab.selected_var = Some(orig_col);
+        }
+
+        if name_resp.drag_started() {
             tab.dragging_col = Some(orig_col);
         }
 
         if let Some(src_col) = tab.dragging_col {
-            if src_col != orig_col && hdr_resp.hovered() {
+            if src_col != orig_col && (name_resp.hovered() || label_resp.hovered()) {
                 hdr_painter.line_segment(
                     [Pos2::new(x0, hdr_clip.top()), Pos2::new(x0, hdr_clip.bottom())],
                     Stroke::new(3.0, pal.accent),
@@ -1017,16 +1064,29 @@ pub fn show_data_grid(
         } else {
             &meta.format
         };
-        hdr_resp.clone().on_hover_text(format!(
-            "变量名: {}\n标签: {}\n类型: {} | Format: {} | 存储长度: {}\n点击排序 | Shift+点击叠加多列排序 | 拖动列头调整顺序 | 右键更多操作",
+        let label_display = if meta.label.is_empty() {
+            "(无)"
+        } else {
+            &meta.label
+        };
+        name_resp.clone().on_hover_text(format!(
+            "变量名: {}\n标签: {}\n类型: {} | Format: {} | 存储长度: {}\n点击变量名排序 | Shift+点击多列叠加排序 | 拖动调整顺序 | 右键更多操作",
             meta.name,
-            if meta.label.is_empty() { "(无)" } else { &meta.label },
+            label_display,
+            meta.var_type.short_label(),
+            fmt_display,
+            meta.storage_width
+        ));
+        label_resp.clone().on_hover_text(format!(
+            "变量名: {}\n标签: {}\n类型: {} | Format: {} | 存储长度: {}\n点击标签仅选中变量（不触发排序，防误触）| 点击上方变量名排序 | 右键更多操作",
+            meta.name,
+            label_display,
             meta.var_type.short_label(),
             fmt_display,
             meta.storage_width
         ));
 
-        hdr_resp.context_menu(|ui| {
+        let mut show_col_ctx_menu = |ui: &mut Ui| {
             ui.label(RichText::new(format!("列: {}", meta.name)).strong());
             ui.separator();
             if ui.button("升序排序 (单列)").clicked() {
@@ -1097,7 +1157,9 @@ pub fn show_data_grid(
                 deferred_hide_col = Some(orig_col);
                 ui.close_menu();
             }
-        });
+        };
+        name_resp.context_menu(&mut show_col_ctx_menu);
+        label_resp.context_menu(&mut show_col_ctx_menu);
     }
 
     hdr_painter.line_segment(

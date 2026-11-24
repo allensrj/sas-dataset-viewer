@@ -11,8 +11,7 @@ pub fn show_right_panel(
     focus_var_search: &mut bool,
     pal: &AppPalette,
 ) {
-    // Lock max width strictly to current panel width so searching / filtering NEVER pops the side panel outward!
-    let panel_w = ui.available_width().max(180.0);
+    let panel_w = ui.available_width().max(120.0);
     ui.set_max_width(panel_w);
 
     ui.horizontal(|ui| {
@@ -80,11 +79,12 @@ fn show_variables_tab(
         return;
     };
 
-    let avail_w = ui.available_width().max(180.0);
+    let avail_w = ui.available_width().max(120.0);
 
-    // Search box (fixed width so typing never triggers side-panel reflow/pop!)
+    // Search box (strictly sized inside avail_w with compact spacing)
     ui.horizontal(|ui| {
-        let input_w = (avail_w - 26.0).max(80.0);
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let input_w = (avail_w - 34.0).max(60.0);
         let resp = ui.add(
             egui::TextEdit::singleline(&mut tab.var_search)
                 .hint_text("搜索变量名或标签... (Ctrl+F)")
@@ -153,11 +153,14 @@ fn show_variables_tab(
         );
     });
 
-    // Two-column compact header bar: [Checkbox] | Col 1 (变量 / 类型 / Format) | Col 2 (标签)
+    // 4-column compact header bar:
+    // [Checkbox 22px] | 变量 (88px ≈ 10 chars) | 类型 (34px) | Format (62px) | 标签 (remaining)
     let row_h = 23.0;
     let cb_w = 22.0;
-    let inner_w = (avail_w - 8.0).max(160.0);
-    let col1_w = ((inner_w - cb_w) * 0.56).max(85.0);
+    let var_w = 88.0;
+    let type_w = 34.0;
+    let fmt_w = 62.0;
+    let inner_w = avail_w.max(120.0);
 
     let (hdr_rect, _) = ui.allocate_exact_size(Vec2::new(inner_w, 20.0), Sense::hover());
     ui.painter().rect_filled(hdr_rect, 0.0, pal.bg_header_name);
@@ -165,30 +168,54 @@ fn show_variables_tab(
         [hdr_rect.left_bottom(), hdr_rect.right_bottom()],
         Stroke::new(1.0, pal.border_header),
     );
-    let col1_x = hdr_rect.left() + cb_w;
-    let col2_x = col1_x + col1_w;
-    ui.painter().line_segment(
-        [Pos2::new(col2_x, hdr_rect.top()), Pos2::new(col2_x, hdr_rect.bottom())],
-        Stroke::new(1.0, pal.border_grid),
-    );
-    ui.painter().text(
-        Pos2::new(col1_x + 4.0, hdr_rect.center().y),
+    let x_var = hdr_rect.left() + cb_w;
+    let x_type = x_var + var_w;
+    let x_fmt = x_type + type_w;
+    let x_lbl = x_fmt + fmt_w;
+    for &div_x in &[x_var, x_type, x_fmt, x_lbl] {
+        if div_x < hdr_rect.right() {
+            ui.painter().line_segment(
+                [Pos2::new(div_x, hdr_rect.top()), Pos2::new(div_x, hdr_rect.bottom())],
+                Stroke::new(1.0, pal.border_grid),
+            );
+        }
+    }
+    let hdr_font = FontId::proportional(10.8);
+    let hdr_painter = ui.painter().with_clip_rect(hdr_rect);
+    hdr_painter.text(
+        Pos2::new(x_var + 4.0, hdr_rect.center().y),
         Align2::LEFT_CENTER,
-        "变量 / 类型 / Format",
-        FontId::proportional(10.8),
+        "变量",
+        hdr_font.clone(),
         pal.text_muted,
     );
-    ui.painter().text(
-        Pos2::new(col2_x + 5.0, hdr_rect.center().y),
-        Align2::LEFT_CENTER,
-        "标签",
-        FontId::proportional(10.8),
+    hdr_painter.text(
+        Pos2::new(x_type + type_w * 0.5, hdr_rect.center().y),
+        Align2::CENTER_CENTER,
+        "类型",
+        hdr_font.clone(),
         pal.text_muted,
     );
+    hdr_painter.text(
+        Pos2::new(x_fmt + 4.0, hdr_rect.center().y),
+        Align2::LEFT_CENTER,
+        "Format",
+        hdr_font.clone(),
+        pal.text_muted,
+    );
+    if x_lbl + 8.0 < hdr_rect.right() {
+        hdr_painter.text(
+            Pos2::new(x_lbl + 5.0, hdr_rect.center().y),
+            Align2::LEFT_CENTER,
+            "标签",
+            hdr_font,
+            pal.text_muted,
+        );
+    }
 
     let mut jump_to_col: Option<usize> = None;
     let mut stats_for_col: Option<usize> = None;
-    let font_name = FontId::proportional(11.8);
+    let font_name = FontId::proportional(11.6);
     let font_meta = FontId::monospace(10.0);
     let font_label = FontId::proportional(11.0);
 
@@ -196,9 +223,7 @@ fn show_variables_tab(
         .id_salt(("var_list_scroll", tab.id))
         .auto_shrink([false, false])
         .show_rows(ui, row_h, matched_cols.len(), |ui, row_range| {
-            let list_w = ui.available_width().max(160.0);
-            let c1_w = ((list_w - cb_w) * 0.56).max(85.0);
-            let _c2_w = (list_w - cb_w - c1_w).max(40.0);
+            let list_w = ui.available_width().max(120.0);
 
             for list_idx in row_range {
                 let col_idx = matched_cols[list_idx];
@@ -254,76 +279,106 @@ fn show_variables_tab(
                     }
                 }
 
-                // Two-column painted info area (strictly clipped so panel width NEVER changes!)
-                let c1_rect = Rect::from_min_size(
-                    Pos2::new(row_rect.left() + cb_w, row_rect.top()),
-                    Vec2::new(c1_w, row_h),
+                // 4 strictly clipped columns: 变量 (88px) | 类型 (34px) | Format (62px) | 标签 (remaining)
+                let rx_var = row_rect.left() + cb_w;
+                let rx_type = rx_var + var_w;
+                let rx_fmt = rx_type + type_w;
+                let rx_lbl = rx_fmt + fmt_w;
+
+                let var_rect = Rect::from_min_max(
+                    Pos2::new(rx_var, row_rect.top()),
+                    Pos2::new(rx_type.min(row_rect.right()), row_rect.bottom()),
                 );
-                let c2_rect = Rect::from_min_max(
-                    Pos2::new(c1_rect.right(), row_rect.top()),
+                let type_rect = Rect::from_min_max(
+                    Pos2::new(rx_type.min(row_rect.right()), row_rect.top()),
+                    Pos2::new(rx_fmt.min(row_rect.right()), row_rect.bottom()),
+                );
+                let fmt_rect = Rect::from_min_max(
+                    Pos2::new(rx_fmt.min(row_rect.right()), row_rect.top()),
+                    Pos2::new(rx_lbl.min(row_rect.right()), row_rect.bottom()),
+                );
+                let lbl_rect = Rect::from_min_max(
+                    Pos2::new(rx_lbl.min(row_rect.right()), row_rect.top()),
                     row_rect.max,
                 );
-                ui.painter().line_segment(
-                    [c1_rect.right_top(), c1_rect.right_bottom()],
-                    Stroke::new(1.0, pal.border_grid),
-                );
 
-                // Column 1: VARNAME + compact Type + Format
-                let (type_str, type_col) = match meta.var_type {
-                    VarType::Numeric => ("N", pal.badge_num),
-                    VarType::String => ("C", pal.badge_char),
-                };
-                let c1_clip = ui.painter().with_clip_rect(c1_rect.shrink2(Vec2::new(3.0, 0.0)));
-                let name_galley = c1_clip.layout_no_wrap(
-                    meta.name.clone(),
-                    font_name.clone(),
-                    if is_selected { pal.accent } else { pal.text_primary },
-                );
-                let name_w = name_galley.size().x;
-                c1_clip.galley(
-                    Pos2::new(c1_rect.left() + 4.0, c1_rect.center().y - name_galley.size().y * 0.5),
-                    name_galley,
-                    pal.text_primary,
-                );
-
-                let tag_x = c1_rect.left() + 4.0 + name_w + 5.0;
-                if tag_x < c1_rect.right() - 8.0 {
-                    c1_clip.text(
-                        Pos2::new(tag_x, c1_rect.center().y),
-                        Align2::LEFT_CENTER,
-                        type_str,
-                        font_meta.clone(),
-                        type_col,
-                    );
-                    if !meta.format.is_empty() {
-                        c1_clip.text(
-                            Pos2::new(tag_x + 12.0, c1_rect.center().y),
-                            Align2::LEFT_CENTER,
-                            &meta.format,
-                            font_meta.clone(),
-                            pal.text_muted,
+                for &div_x in &[rx_var, rx_type, rx_fmt, rx_lbl] {
+                    if div_x < row_rect.right() {
+                        ui.painter().line_segment(
+                            [Pos2::new(div_x, row_rect.top()), Pos2::new(div_x, row_rect.bottom())],
+                            Stroke::new(1.0, pal.border_grid),
                         );
                     }
                 }
 
-                // Column 2: Variable Label
-                let lbl = if meta.label.is_empty() {
-                    "-"
-                } else {
-                    meta.label.as_str()
-                };
-                ui.painter()
-                    .with_clip_rect(c2_rect.shrink2(Vec2::new(4.0, 0.0)))
-                    .text(
-                        Pos2::new(c2_rect.left() + 5.0, c2_rect.center().y),
-                        Align2::LEFT_CENTER,
-                        lbl,
-                        font_label.clone(),
-                        pal.text_muted,
-                    );
+                // Col 1: Variable Name (reserved ~10 chars)
+                if var_rect.width() > 6.0 {
+                    ui.painter()
+                        .with_clip_rect(var_rect.shrink2(Vec2::new(3.0, 0.0)))
+                        .text(
+                            Pos2::new(var_rect.left() + 4.0, var_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            &meta.name,
+                            font_name.clone(),
+                            if is_selected { pal.accent } else { pal.text_primary },
+                        );
+                }
 
-                // Interactive hit area for columns 1+2 (excludes checkbox!)
-                let info_rect = Rect::from_min_max(c1_rect.min, c2_rect.max);
+                // Col 2: Type (narrow badge: Num / Char)
+                if type_rect.width() > 6.0 {
+                    let (type_str, type_col) = match meta.var_type {
+                        VarType::Numeric => ("Num", pal.badge_num),
+                        VarType::String => ("Char", pal.badge_char),
+                    };
+                    ui.painter()
+                        .with_clip_rect(type_rect.shrink2(Vec2::new(2.0, 0.0)))
+                        .text(
+                            Pos2::new(type_rect.center().x, type_rect.center().y),
+                            Align2::CENTER_CENTER,
+                            type_str,
+                            font_meta.clone(),
+                            type_col,
+                        );
+                }
+
+                // Col 3: Format (narrow monospace)
+                if fmt_rect.width() > 6.0 {
+                    let fmt_str = if meta.format.is_empty() {
+                        "-"
+                    } else {
+                        meta.format.as_str()
+                    };
+                    ui.painter()
+                        .with_clip_rect(fmt_rect.shrink2(Vec2::new(3.0, 0.0)))
+                        .text(
+                            Pos2::new(fmt_rect.left() + 4.0, fmt_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            fmt_str,
+                            font_meta.clone(),
+                            pal.text_muted,
+                        );
+                }
+
+                // Col 4: Variable Label (fills remaining width)
+                if lbl_rect.width() > 8.0 {
+                    let lbl = if meta.label.is_empty() {
+                        "-"
+                    } else {
+                        meta.label.as_str()
+                    };
+                    ui.painter()
+                        .with_clip_rect(lbl_rect.shrink2(Vec2::new(4.0, 0.0)))
+                        .text(
+                            Pos2::new(lbl_rect.left() + 5.0, lbl_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            lbl,
+                            font_label.clone(),
+                            pal.text_muted,
+                        );
+                }
+
+                // Interactive hit area for all 4 info columns (excludes checkbox!)
+                let info_rect = Rect::from_min_max(Pos2::new(rx_var, row_rect.top()), row_rect.max);
                 let click_resp = ui.interact(
                     info_rect,
                     Id::new(("var_row_click", tab.id, col_idx)),
@@ -765,12 +820,14 @@ fn show_shortcuts_tab(ui: &mut Ui, pal: &AppPalette) {
                 ui,
                 "搜索、列与排序操作",
                 &[
-                    ("顶部 Search 框", "在当前数据集内检索单元格值（Enter 下一个 / Shift+Enter 上一个）"),
+                    ("Ctrl/Cmd + Shift + F", "聚焦顶部 Search 框（支持 Aa 大小写 / 全字 / .* 正则，字符与数值通用）"),
+                    ("Enter / F3", "跳转下一个搜索匹配（Shift+Enter / Shift+F3 上一个）"),
+                    ("点击变量名列头", "对该变量升序/降序/取消排序（点击下方标签行不排序，防误触）"),
+                    ("Shift + 点击变量名", "叠加多个变量进行排序"),
+                    ("点击 # / 行号列头", "恢复数据集初始行序（仅清除排序，保留筛选条件）"),
                     ("Alt + ← / →", "将当前选中的变量列向左 / 向右移动位置"),
-                    ("拖动列头", "自由拖拽调整变量列顺序"),
-                    ("点击列头", "对该变量进行升序/降序/取消排序"),
-                    ("Shift + 点击列头", "叠加多个变量进行排序"),
-                    ("右键列头", "自适应列宽 / 批量自适应列宽（约 6~30 字符范围）"),
+                    ("拖动变量名列头", "自由拖拽调整变量列顺序"),
+                    ("右键列头", "自适应列宽（约 6~30 字符）/ 重置均匀列宽"),
                     ("右键单元格", "单值或多值筛选（等于/不等于/属于/包含/大于/小于等）"),
                 ],
                 pal,

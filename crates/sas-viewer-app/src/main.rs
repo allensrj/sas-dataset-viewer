@@ -152,7 +152,12 @@ fn main() {
     }));
 
     let mut initial_paths: Vec<PathBuf> = Vec::new();
-    let mut mode = RendererMode::Wgpu;
+    // Windows 默认 glow：wgpu/DX12 拖动标题栏或边框会冻结 1~2s，见 #1。
+    let mut mode = if cfg!(target_os = "windows") {
+        RendererMode::Glow
+    } else {
+        RendererMode::Wgpu
+    };
     let mut no_fallback = false;
 
     for arg in std::env::args().skip(1) {
@@ -174,7 +179,10 @@ fn main() {
                 Box::new(move |cc| Ok(Box::new(SasViewerApp::new(cc, paths)))),
             ) {
                 append_startup_log(&format!("[fallback] wgpu failed: {err}"));
-                if !no_fallback && spawn_with_renderer("--renderer=glow", false, &initial_paths) {
+                // Tier 3 fallback: pure-CPU Win32 GDI software renderer (zero GPU/OpenGL/DX12 required!)
+                if !no_fallback
+                    && spawn_with_renderer("--renderer=software", true, &initial_paths)
+                {
                     return;
                 }
                 show_fatal_error(&format!("Wgpu 渲染器启动失败：\n{err}"));
@@ -188,10 +196,8 @@ fn main() {
                 Box::new(move |cc| Ok(Box::new(SasViewerApp::new(cc, paths)))),
             ) {
                 append_startup_log(&format!("[fallback] glow failed: {err}"));
-                // Tier 3 fallback: pure-CPU Win32 GDI software renderer (zero GPU/OpenGL/DX12 required!)
-                if !no_fallback
-                    && spawn_with_renderer("--renderer=software", true, &initial_paths)
-                {
+                // 默认渲染器失败时降级到 wgpu（DX12/Vulkan），子进程保留自己的降级链。
+                if !no_fallback && spawn_with_renderer("--renderer=wgpu", false, &initial_paths) {
                     return;
                 }
                 show_fatal_error(&format!("Glow 渲染器启动失败：\n{err}"));

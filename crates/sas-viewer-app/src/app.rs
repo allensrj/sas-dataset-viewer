@@ -25,9 +25,13 @@ pub struct SasViewerApp {
 
 impl SasViewerApp {
     pub fn new(cc: &eframe::CreationContext<'_>, initial_paths: Vec<PathBuf>) -> Self {
-        setup_cjk_fonts(&cc.egui_ctx);
+        Self::from_ctx(&cc.egui_ctx, initial_paths)
+    }
+
+    pub fn from_ctx(egui_ctx: &egui::Context, initial_paths: Vec<PathBuf>) -> Self {
+        setup_cjk_fonts(egui_ctx);
         let mut config = AppConfig::load();
-        apply_theme(&cc.egui_ctx, config.dark_mode);
+        apply_theme(egui_ctx, config.dark_mode);
 
         let mut app = Self {
             config: config.clone(),
@@ -47,7 +51,7 @@ impl SasViewerApp {
                 config.add_root_folder(p);
             } else if p.is_file() && SasFormatKind::from_path(&p).is_some() {
                 config.add_root_file(p.clone());
-                app.open_dataset(p, OpenSplitMode::Tab, Some(cc.egui_ctx.clone()));
+                app.open_dataset(p, OpenSplitMode::Tab, Some(egui_ctx.clone()));
             }
         }
         app.config = config;
@@ -444,6 +448,12 @@ impl<'a> TabViewer for DatasetDockViewer<'a> {
 
 impl eframe::App for SasViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_ui(ctx);
+    }
+}
+
+impl SasViewerApp {
+    pub fn update_ui(&mut self, ctx: &egui::Context) {
         // 1. Poll background streaming loaders across all open tabs
         let mut any_loading = false;
         for tab in self.tabs.values_mut() {

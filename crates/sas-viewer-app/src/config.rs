@@ -27,12 +27,24 @@ pub struct AppConfig {
     pub left_panel_open: bool,
     #[serde(default = "default_true")]
     pub right_panel_open: bool,
+    #[serde(default = "default_left_panel_width")]
+    pub left_panel_width: f32,
+    #[serde(default = "default_right_panel_width")]
+    pub right_panel_width: f32,
     #[serde(default)]
     pub dark_mode: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_left_panel_width() -> f32 {
+    250.0
+}
+
+fn default_right_panel_width() -> f32 {
+    360.0
 }
 
 impl Default for AppConfig {
@@ -46,6 +58,8 @@ impl Default for AppConfig {
             expanded_folders: HashSet::new(),
             left_panel_open: true,
             right_panel_open: true,
+            left_panel_width: default_left_panel_width(),
+            right_panel_width: default_right_panel_width(),
             dark_mode: false,
         }
     }

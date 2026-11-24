@@ -802,12 +802,20 @@ impl SasViewerApp {
 
         // Left Panel: Collapsible File Manager
         if self.config.left_panel_open {
-            egui::SidePanel::left("left_file_manager")
+            let left_resp = egui::SidePanel::left("left_file_manager")
                 .resizable(true)
-                .default_width(250.0)
-                .width_range(160.0..=480.0)
+                .default_width(self.config.left_panel_width.clamp(160.0, 520.0))
+                .width_range(160.0..=520.0)
                 .show(ctx, |ui| {
-                    let tree_actions = self.file_tree.show(ui, &mut self.config, &pal);
+                    let panel_rect = ui.max_rect();
+                    ui.set_min_width(panel_rect.width());
+                    let mut child_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(panel_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    child_ui.set_clip_rect(panel_rect);
+                    let tree_actions = self.file_tree.show(&mut child_ui, &mut self.config, &pal);
                     for act in tree_actions {
                         match act {
                             FileTreeAction::OpenFile { path, mode } => {
@@ -825,23 +833,26 @@ impl SasViewerApp {
                         }
                     }
                 });
+            let cur_w = left_resp.response.rect.width().clamp(160.0, 520.0);
+            if (cur_w - self.config.left_panel_width).abs() > 1.0
+                && ctx.input(|i| !i.pointer.any_down())
+            {
+                self.config.left_panel_width = cur_w;
+                self.config.save();
+            }
         }
 
         // Right Panel: Variables (4-col) / Statistics (selectable values) / Shortcuts
-        // Rendered inside a clipped, layout-isolated child UI so inner widgets NEVER fight or bounce
-        // back the user's dragged panel width!
+        // `ui.set_min_width(panel_rect.width())` keeps SidePanel's persisted width locked to the exact
+        // user-dragged width (neither shrinking on mouse move nor expanding from inner widgets!).
         if self.config.right_panel_open {
-            egui::SidePanel::right("right_inspector_panel")
+            let right_resp = egui::SidePanel::right("right_inspector_panel")
                 .resizable(true)
-                .default_width(360.0)
+                .default_width(self.config.right_panel_width.clamp(160.0, 760.0))
                 .width_range(160.0..=760.0)
                 .show(ctx, |ui| {
-                    let panel_rect = ui.available_rect_before_wrap();
-                    // Keep parent min_rect strictly <= panel_rect width so SidePanel always obeys dragged width
-                    ui.allocate_exact_size(
-                        egui::Vec2::new((panel_rect.width() - 2.0).max(0.0), panel_rect.height()),
-                        egui::Sense::hover(),
-                    );
+                    let panel_rect = ui.max_rect();
+                    ui.set_min_width(panel_rect.width());
                     let mut child_ui = ui.new_child(
                         egui::UiBuilder::new()
                             .max_rect(panel_rect)
@@ -859,6 +870,13 @@ impl SasViewerApp {
                         &pal,
                     );
                 });
+            let cur_w = right_resp.response.rect.width().clamp(160.0, 760.0);
+            if (cur_w - self.config.right_panel_width).abs() > 1.0
+                && ctx.input(|i| !i.pointer.any_down())
+            {
+                self.config.right_panel_width = cur_w;
+                self.config.save();
+            }
         }
 
         // Center Panel: Multi-Dataset Docking & Split Workspace
@@ -988,4 +1006,167 @@ fn search_option_toggle(
             .stroke(egui::Stroke::new(1.0, pal.accent));
     }
     ui.add(btn).on_hover_text(tooltip).clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_right_side_panel_resize_persists_across_mouse_moves() {
+        for ppp in [1.0f32, 1.25, 2.0] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(ppp);
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 800.0));
+            let pal = AppPalette::for_mode(false);
+            let mut right_tab = RightTab::Variables;
+            let mut focus_var = false;
+
+            let run_frame = |events: Vec<egui::Event>,
+                             right_tab: &mut RightTab,
+                             focus_var: &mut bool|
+             -> f32 {
+                let mut measured_w = 0.0f32;
+                let raw = egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                };
+                let _ = ctx.run(raw, |ctx| {
+                    let resp = egui::SidePanel::right("right_inspector_panel")
+                        .resizable(true)
+                        .default_width(360.0)
+                        .width_range(160.0..=760.0)
+                        .show(ctx, |ui| {
+                            let panel_rect = ui.max_rect();
+                            ui.set_min_width(panel_rect.width());
+                            let mut child_ui = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(panel_rect)
+                                    .layout(egui::Layout::top_down(egui::Align::Min)),
+                            );
+                            child_ui.set_clip_rect(panel_rect);
+                            show_right_panel(&mut child_ui, None, right_tab, focus_var, &pal);
+                        });
+                    measured_w = resp.response.rect.width();
+                    egui::CentralPanel::default().show(ctx, |_ui| {});
+                });
+                measured_w
+            };
+
+            // 1. Initial width stays pinned at 360px across 25 frames of mouse moves
+            let mut w = 0.0;
+            for i in 0..25 {
+                w = run_frame(
+                    vec![egui::Event::PointerMoved(egui::Pos2::new(
+                        200.0 + (i as f32) * 5.0,
+                        300.0,
+                    ))],
+                    &mut right_tab,
+                    &mut focus_var,
+                );
+            }
+            assert!(
+                (w - 360.0).abs() < 1.5,
+                "ppp={ppp}: initial width drifted to {w}, expected ~360.0"
+            );
+
+            // 2. Drag left border inward -> width=240, then move mouse for 30 frames
+            let border_x = 1280.0 - w;
+            let _ = run_frame(
+                vec![egui::Event::PointerMoved(egui::Pos2::new(border_x, 400.0))],
+                &mut right_tab,
+                &mut focus_var,
+            );
+            let _ = run_frame(
+                vec![egui::Event::PointerButton {
+                    pos: egui::Pos2::new(border_x, 400.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                &mut right_tab,
+                &mut focus_var,
+            );
+            let _ = run_frame(
+                vec![egui::Event::PointerMoved(egui::Pos2::new(1040.0, 400.0))],
+                &mut right_tab,
+                &mut focus_var,
+            );
+            let _ = run_frame(
+                vec![egui::Event::PointerButton {
+                    pos: egui::Pos2::new(1040.0, 400.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                &mut right_tab,
+                &mut focus_var,
+            );
+
+            for i in 0..30 {
+                w = run_frame(
+                    vec![egui::Event::PointerMoved(egui::Pos2::new(
+                        500.0 + (i as f32) * 3.0,
+                        250.0,
+                    ))],
+                    &mut right_tab,
+                    &mut focus_var,
+                );
+            }
+            assert!(
+                (w - 240.0).abs() < 2.0,
+                "ppp={ppp}: dragged narrow width drifted to {w}, expected ~240.0"
+            );
+
+            // 3. Drag left border outward -> width=500, switch tabs, move mouse for 30 frames
+            let border_x2 = 1280.0 - w;
+            let _ = run_frame(
+                vec![egui::Event::PointerMoved(egui::Pos2::new(border_x2, 400.0))],
+                &mut right_tab,
+                &mut focus_var,
+            );
+            let _ = run_frame(
+                vec![egui::Event::PointerButton {
+                    pos: egui::Pos2::new(border_x2, 400.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                &mut right_tab,
+                &mut focus_var,
+            );
+            let _ = run_frame(
+                vec![egui::Event::PointerMoved(egui::Pos2::new(780.0, 400.0))],
+                &mut right_tab,
+                &mut focus_var,
+            );
+            let _ = run_frame(
+                vec![egui::Event::PointerButton {
+                    pos: egui::Pos2::new(780.0, 400.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                &mut right_tab,
+                &mut focus_var,
+            );
+
+            right_tab = RightTab::Statistics;
+            for i in 0..30 {
+                w = run_frame(
+                    vec![egui::Event::PointerMoved(egui::Pos2::new(
+                        400.0 + (i as f32) * 3.0,
+                        250.0,
+                    ))],
+                    &mut right_tab,
+                    &mut focus_var,
+                );
+            }
+            assert!(
+                (w - 500.0).abs() < 2.0,
+                "ppp={ppp}: dragged wide width drifted to {w}, expected ~500.0"
+            );
+        }
+    }
 }

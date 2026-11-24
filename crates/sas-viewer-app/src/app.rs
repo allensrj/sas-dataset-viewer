@@ -2,12 +2,12 @@ use crate::config::AppConfig;
 use crate::panels::data_grid::{show_data_grid, GridAction};
 use crate::panels::file_tree::{format_file_size, FileTreeAction, FileTreeState, OpenSplitMode};
 use crate::panels::right_panel::show_right_panel;
-use crate::sample_gen::generate_sample_datasets;
-use crate::state::{DatasetTabState, RightTab};
+use crate::sample_gen::{generate_sample_datasets, resolve_sample_dir};
+use crate::state::{DatasetTabState, FocusRegion, RightTab};
 use crate::theme::{apply_theme, setup_cjk_fonts, AppPalette};
-use egui::{Key, RichText, Ui};
+use egui::{Color32, Key, RichText, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle, SurfaceIndex, TabViewer};
-use sas_engine::{EncodingChoice, SasFormatKind};
+use sas_engine::{ColumnStats, EncodingChoice, SasFormatKind};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -26,11 +26,11 @@ pub struct SasViewerApp {
 impl SasViewerApp {
     pub fn from_ctx(egui_ctx: &egui::Context, initial_paths: Vec<PathBuf>) -> Self {
         setup_cjk_fonts(egui_ctx);
-        let mut config = AppConfig::load();
+        let config = AppConfig::load();
         apply_theme(egui_ctx, config.dark_mode);
 
         let mut app = Self {
-            config: config.clone(),
+            config,
             file_tree: FileTreeState::default(),
             dock_state: DockState::new(Vec::new()),
             tabs: HashMap::new(),
@@ -41,16 +41,9 @@ impl SasViewerApp {
             status_toast: None,
         };
 
-        // Handle paths passed via CLI / double-click association
         for p in initial_paths {
-            if p.is_dir() {
-                config.add_root_folder(p);
-            } else if p.is_file() && SasFormatKind::from_path(&p).is_some() {
-                config.add_root_file(p.clone());
-                app.open_dataset(p, OpenSplitMode::Tab, Some(egui_ctx.clone()));
-            }
+            app.ingest_dropped_path(p, Some(egui_ctx.clone()));
         }
-        app.config = config;
         app.file_tree.refresh_all(&app.config);
         app
     }
@@ -59,13 +52,31 @@ impl SasViewerApp {
         self.status_toast = Some((msg.into(), std::time::Instant::now()));
     }
 
+    /// Dropping a folder adds that folder; dropping a single `.xpt` / `.sas7bdat` file
+    /// automatically adds its parent folder (including sibling datasets) AND opens the file!
+    fn ingest_dropped_path(&mut self, path: PathBuf, ctx: Option<egui::Context>) {
+        if path.is_dir() {
+            self.config.add_root_folder(path.clone());
+            self.file_tree.refresh_root(&path, &self.config);
+            self.toast(format!("已添加目录: {}", self.config.display_name_for(&path)));
+        } else if path.is_file() && SasFormatKind::from_path(&path).is_some() {
+            if let Some(parent) = path.parent() {
+                let parent_buf = parent.to_path_buf();
+                self.config.add_root_folder(parent_buf.clone());
+                self.file_tree.refresh_root(&parent_buf, &self.config);
+            } else {
+                self.config.add_root_file(path.clone());
+            }
+            self.open_dataset(path, OpenSplitMode::Tab, ctx);
+        }
+    }
+
     fn open_dataset(&mut self, path: PathBuf, mode: OpenSplitMode, ctx: Option<egui::Context>) {
         if SasFormatKind::from_path(&path).is_none() {
             self.toast("仅支持 .sas7bdat 和 .xpt 数据集文件");
             return;
         }
 
-        // If already open and mode == Tab, simply focus the existing tab
         if mode == OpenSplitMode::Tab {
             if let Some((&existing_id, _)) = self.tabs.iter().find(|(_, t)| t.path == path) {
                 if let Some((surf, node, tab_idx)) = self.dock_state.find_tab(&existing_id) {
@@ -83,7 +94,6 @@ impl SasViewerApp {
         let tab = DatasetTabState::new(id, path, disp_name, EncodingChoice::Auto, ctx);
         self.tabs.insert(id, tab);
 
-        // Place tab in dock according to split mode
         let focused_node = self
             .dock_state
             .focused_leaf()
@@ -147,16 +157,13 @@ impl SasViewerApp {
             .pick_files()
         {
             for f in files {
-                self.config.add_root_file(f.clone());
-                self.open_dataset(f, OpenSplitMode::Tab, Some(ctx.clone()));
+                self.ingest_dropped_path(f, Some(ctx.clone()));
             }
         }
     }
 
     fn generate_and_load_samples(&mut self, ctx: egui::Context) {
-        let sample_dir = std::env::current_dir()
-            .unwrap_or_else(|_| std::env::temp_dir())
-            .join("sample_datasets");
+        let sample_dir = resolve_sample_dir();
         match generate_sample_datasets(&sample_dir) {
             Ok(files) => {
                 self.config.add_root_folder(sample_dir.clone());
@@ -167,9 +174,19 @@ impl SasViewerApp {
                 if let Some(second) = files.get(1) {
                     self.open_dataset(second.clone(), OpenSplitMode::SplitRight, Some(ctx));
                 }
-                self.toast("已生成示例数据集（含 dm.sas7bdat / ae.xpt / 20万行 lb_200k.sas7bdat）");
+                self.toast(format!(
+                    "已生成示例数据集至 {}（含 dm / ae / 20万行 lb_200k）",
+                    sample_dir.display()
+                ));
             }
-            Err(e) => self.toast(format!("生成示例失败: {e}")),
+            Err(e) => {
+                self.toast(format!("生成示例失败: {e}"));
+                let _ = rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Error)
+                    .set_title("生成示例数据集失败")
+                    .set_description(&format!("无法在 {} 生成示例数据集：\n{}", sample_dir.display(), e))
+                    .show();
+            }
         }
     }
 
@@ -182,13 +199,7 @@ impl SasViewerApp {
                 .collect()
         });
         for p in dropped {
-            if p.is_dir() {
-                self.config.add_root_folder(p.clone());
-                self.file_tree.refresh_root(&p, &self.config);
-            } else if p.is_file() && SasFormatKind::from_path(&p).is_some() {
-                self.config.add_root_file(p.clone());
-                self.open_dataset(p, OpenSplitMode::Tab, Some(ctx.clone()));
-            }
+            self.ingest_dropped_path(p, Some(ctx.clone()));
         }
     }
 
@@ -196,7 +207,6 @@ impl SasViewerApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let typing_in_text = ctx.wants_keyboard_input();
 
-        // Modifier shortcuts work globally
         let (cmd_b, cmd_backslash, cmd_f, cmd_c, cmd_w) = ctx.input(|i| {
             let cmd = i.modifiers.command;
             (
@@ -241,7 +251,6 @@ impl SasViewerApp {
             }
         }
 
-        // Guard: suppress bare single-letter & grid navigation shortcuts while typing in any input box
         if typing_in_text {
             return;
         }
@@ -291,7 +300,7 @@ impl SasViewerApp {
         let mut toast_msg: Option<String> = None;
 
         if let Some(tab) = self.tabs.get_mut(&active_id) {
-            // F: show stats for currently selected cell or variable in Right Statistics panel
+            // F: show stats + value frequencies in Right Statistics panel
             if key_f {
                 if let Some(col) = tab.active_target_col() {
                     tab.refresh_stats_for(col);
@@ -301,10 +310,10 @@ impl SasViewerApp {
                 }
             }
 
-            // D: quick `=` filter on selected cell (or open quick filter for selected variable)
+            // D: unified `=` / multi-value `IN` quick filter (works in DataGrid AND StatsList!)
             if key_d {
-                if tab.trigger_quick_d_filter() {
-                    toast_msg = Some("已应用快速等值 (=) 筛选".to_string());
+                if let Some(msg) = tab.trigger_quick_d_filter() {
+                    toast_msg = Some(msg);
                 }
             }
 
@@ -314,19 +323,19 @@ impl SasViewerApp {
                 toast_msg = Some("已清除全部筛选与排序 (C)".to_string());
             }
 
-            // H: uncheck all variables in right variable panel
+            // H: hide all variables
             if key_h {
                 tab.hide_all_variables();
                 toast_msg = Some("已隐藏所有变量 (按 U 恢复)".to_string());
             }
 
-            // U: check all variables in right variable panel
+            // U: show all variables
             if key_u {
                 tab.show_all_variables();
                 toast_msg = Some("已全选恢复所有变量 (U)".to_string());
             }
 
-            // Alt + Left / Right: move selected variable column left/right
+            // Alt + Left / Right: move selected variable column
             if alt_left {
                 if let Some(col) = tab.active_target_col() {
                     tab.move_column_by(col, -1);
@@ -338,8 +347,25 @@ impl SasViewerApp {
                 }
             }
 
-            // Grid cell keyboard navigation
-            if arrow_up || arrow_down || arrow_left || arrow_right || page_up || page_down {
+            // Arrow navigation: route to StatsList when focused there, else DataGrid!
+            if (arrow_up || arrow_down) && tab.focus_region == FocusRegion::StatsList {
+                let len = match &tab.cached_stats {
+                    Some(ColumnStats::String(ss)) => ss.frequencies.len(),
+                    Some(ColumnStats::Numeric(ns)) => ns.frequencies.len(),
+                    None => 0,
+                };
+                if len > 0 {
+                    let cur = tab.stats_anchor_idx.unwrap_or(0).min(len - 1);
+                    let next = if arrow_up {
+                        cur.saturating_sub(1)
+                    } else {
+                        (cur + 1).min(len - 1)
+                    };
+                    tab.stats_selected_indices.clear();
+                    tab.stats_selected_indices.insert(next);
+                    tab.stats_anchor_idx = Some(next);
+                }
+            } else if arrow_up || arrow_down || arrow_left || arrow_right || page_up || page_down {
                 let vis_cols = tab.visible_columns();
                 let nrows = tab.visible_rows.len();
                 if nrows > 0 && !vis_cols.is_empty() {
@@ -369,8 +395,7 @@ impl SasViewerApp {
                         cur_c_vis
                     };
                     let new_orig_col = vis_cols[new_c_vis];
-                    tab.selected_cell = Some((new_r, new_orig_col));
-                    tab.selected_var = Some(new_orig_col);
+                    tab.select_single_cell(new_r, new_orig_col);
                     tab.scroll_to_row = Some(new_r);
                     tab.scroll_to_col = Some(new_orig_col);
                 }
@@ -420,7 +445,6 @@ impl<'a> TabViewer for DatasetDockViewer<'a> {
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         let tab_id = *tab;
-        // Detect pointer interaction inside this split pane to switch active dataset focus seamlessly!
         if ui.rect_contains_pointer(ui.max_rect())
             && ui.input(|i| i.pointer.any_pressed() || i.pointer.any_click())
         {
@@ -444,7 +468,6 @@ impl<'a> TabViewer for DatasetDockViewer<'a> {
 
 impl SasViewerApp {
     pub fn update_ui(&mut self, ctx: &egui::Context) {
-        // 1. Poll background streaming loaders across all open tabs
         let mut any_loading = false;
         for tab in self.tabs.values_mut() {
             tab.poll_loader();
@@ -456,15 +479,12 @@ impl SasViewerApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
 
-        // 2. Handle OS file/folder drops
         self.handle_os_dropped_files(ctx);
-
-        // 3. Handle unified keyboard shortcuts
         self.handle_shortcuts(ctx);
 
         let pal = AppPalette::for_mode(self.config.dark_mode);
 
-        // 4. Top compact toolbar
+        // Top compact toolbar (streamlined: removed redundant Add Folder / Open File; added dataset Search!)
         egui::TopBottomPanel::top("top_toolbar")
             .exact_height(34.0)
             .show(ctx, |ui| {
@@ -484,15 +504,9 @@ impl SasViewerApp {
                     }
                     ui.separator();
 
-                    if ui.button("📁 添加文件夹").clicked() {
-                        self.pick_folder_and_add();
-                    }
-                    if ui.button("📄 打开文件").clicked() {
-                        self.pick_files_and_open(ctx.clone());
-                    }
                     if ui
                         .button("⚡ 生成示例数据集")
-                        .on_hover_text("生成 dm.sas7bdat / ae.xpt / 20万行 lb_200k.sas7bdat 供立即体验")
+                        .on_hover_text("在本地可写目录生成 dm.sas7bdat / ae.xpt / 20万行 lb_200k.sas7bdat")
                         .clicked()
                     {
                         self.generate_and_load_samples(ctx.clone());
@@ -503,17 +517,79 @@ impl SasViewerApp {
                             ui.separator();
                             if ui
                                 .button("自适应列宽")
-                                .on_hover_text("批量调整所有可见列宽贴合数据内容")
+                                .on_hover_text("批量调整所有可见列宽至数据实际长度（范围约 6~30 字符）")
                                 .clicked()
                             {
                                 tab.auto_fit_all_visible_columns();
                             }
-                            if !tab.query.is_empty()
-                                && ui
+
+                            ui.separator();
+                            // Dataset cell-value Search bar + Prev / Next
+                            ui.label(RichText::new("Search").strong().size(12.0).color(pal.text_muted));
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut tab.search_query)
+                                    .hint_text("检索单元格值...")
+                                    .desired_width(145.0),
+                            );
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                if ui.input(|i| i.modifiers.shift) {
+                                    tab.search_prev();
+                                } else {
+                                    tab.search_next();
+                                }
+                                resp.request_focus();
+                            } else if resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                                tab.clear_cell_search();
+                            }
+
+                            if !tab.search_query.is_empty()
+                                && ui.small_button("×").on_hover_text("清空搜索").clicked()
+                            {
+                                tab.clear_cell_search();
+                            }
+                            if ui
+                                .small_button("↑ 上一个")
+                                .on_hover_text("跳转到上一个匹配单元格 (Shift+Enter)")
+                                .clicked()
+                            {
+                                tab.search_prev();
+                            }
+                            if ui
+                                .small_button("↓ 下一个")
+                                .on_hover_text("跳转到下一个匹配单元格 (Enter)")
+                                .clicked()
+                            {
+                                tab.search_next();
+                            }
+
+                            if !tab.search_executed_query.is_empty() {
+                                let match_txt = if tab.search_matches.is_empty() {
+                                    "0 匹配".to_string()
+                                } else {
+                                    let cur = tab.search_current_idx.map(|i| i + 1).unwrap_or(0);
+                                    let suffix = if tab.search_truncated { "+" } else { "" };
+                                    format!("{}/{}{}", cur, tab.search_matches.len(), suffix)
+                                };
+                                ui.label(
+                                    RichText::new(match_txt)
+                                        .monospace()
+                                        .size(11.2)
+                                        .color(if tab.search_matches.is_empty() {
+                                            Color32::from_rgb(200, 75, 75)
+                                        } else {
+                                            pal.accent
+                                        }),
+                                );
+                            }
+
+                            if !tab.query.is_empty() {
+                                ui.separator();
+                                if ui
                                     .button(RichText::new("清除筛选/排序 (C)").color(pal.accent))
                                     .clicked()
-                            {
-                                tab.clear_all_filters_and_sorts();
+                                {
+                                    tab.clear_all_filters_and_sorts();
+                                }
                             }
                         }
                     }
@@ -547,13 +623,24 @@ impl SasViewerApp {
                 });
             });
 
-        // 5. Bottom Status Bar (with Encoding Switcher!)
+        // Bottom Status Bar (with folder display name prefix + Encoding Switcher!)
         egui::TopBottomPanel::bottom("bottom_status_bar")
             .exact_height(26.0)
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     if let Some(active_id) = self.active_tab_id {
                         if let Some(tab) = self.tabs.get_mut(&active_id) {
+                            let title_with_dir = if let Some(parent) = tab.path.parent() {
+                                let dir_disp = self.config.display_name_for(parent);
+                                if !dir_disp.is_empty() {
+                                    format!("{} - {}", dir_disp, tab.display_name)
+                                } else {
+                                    tab.display_name.clone()
+                                }
+                            } else {
+                                tab.display_name.clone()
+                            };
+
                             if let Some(table) = &tab.table {
                                 let row_info = if tab.query.filters.is_empty() {
                                     format!("{} 行", table.row_count)
@@ -566,7 +653,7 @@ impl SasViewerApp {
                                 ui.label(
                                     RichText::new(format!(
                                         "{} [{}]  |  {} × {}/{} 列  |  文件: {}  |  内存: {:.1} MB  |  加载: {}ms  |  查询: {}ms",
-                                        tab.display_name,
+                                        title_with_dir,
                                         table.metadata.format_kind.display_badge(),
                                         row_info,
                                         vis_c,
@@ -603,7 +690,7 @@ impl SasViewerApp {
                                 );
                             } else if tab.loading {
                                 ui.label(
-                                    RichText::new(format!("正在加载 {} ...", tab.display_name))
+                                    RichText::new(format!("正在加载 {} ...", title_with_dir))
                                         .size(11.3)
                                         .color(pal.accent),
                                 );
@@ -612,16 +699,15 @@ impl SasViewerApp {
                     } else {
                         ui.label(
                             RichText::new(
-                                "就绪 | 支持 .sas7bdat 与 .xpt | 快捷键: F(统计) D(等值筛选) C(清空) H(全隐) U(全显)",
+                                "就绪 | 直接拖入任意 .sas7bdat / .xpt 文件将自动导入同目录全部数据集 | 快捷键: F(统计) D(筛选) C(清空) H(全隐) U(全显)",
                             )
                             .size(11.3)
                             .color(pal.text_muted),
                         );
                     }
 
-                    // Transient status toast
                     if let Some((msg, ts)) = &self.status_toast {
-                        if ts.elapsed().as_secs_f32() < 3.0 {
+                        if ts.elapsed().as_secs_f32() < 3.5 {
                             ui.separator();
                             ui.label(RichText::new(msg).size(11.3).strong().color(pal.accent));
                         } else {
@@ -631,7 +717,7 @@ impl SasViewerApp {
                 });
             });
 
-        // 6. Left Panel: Collapsible File Manager
+        // Left Panel: Collapsible File Manager
         if self.config.left_panel_open {
             egui::SidePanel::left("left_file_manager")
                 .resizable(true)
@@ -658,12 +744,12 @@ impl SasViewerApp {
                 });
         }
 
-        // 7. Right Panel: Variables / Statistics / Shortcuts
+        // Right Panel: Variables (2-col) / Statistics (selectable values) / Shortcuts
         if self.config.right_panel_open {
             egui::SidePanel::right("right_inspector_panel")
                 .resizable(true)
-                .default_width(310.0)
-                .width_range(220.0..=560.0)
+                .default_width(320.0)
+                .width_range(220.0..=580.0)
                 .show(ctx, |ui| {
                     let active_tab = self
                         .active_tab_id
@@ -678,11 +764,10 @@ impl SasViewerApp {
                 });
         }
 
-        // 8. Center Panel: Multi-Dataset Docking & Split Workspace
+        // Center Panel: Multi-Dataset Docking & Split Workspace
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(pal.bg_canvas))
             .show(ctx, |ui| {
-                // Check if user dragged a dataset from the left File Tree and dropped it onto center area
                 let center_rect = ui.max_rect();
                 if let Some(dropped_path) = self.file_tree.take_dropped_dataset_for_dock(ctx) {
                     if let Some(pos) = ctx.pointer_latest_pos() {
@@ -720,22 +805,13 @@ impl SasViewerApp {
                                 .color(pal.text_muted),
                             );
                             ui.add_space(18.0);
-                            ui.horizontal(|ui| {
-                                ui.add_space((ui.available_width() - 330.0).max(0.0) * 0.5);
-                                if ui.button("📁 添加数据集文件夹").clicked() {
-                                    self.pick_folder_and_add();
-                                }
-                                if ui.button("📄 打开单个文件").clicked() {
-                                    self.pick_files_and_open(ctx.clone());
-                                }
-                                if ui.button("⚡ 生成示例数据集").clicked() {
-                                    self.generate_and_load_samples(ctx.clone());
-                                }
-                            });
+                            if ui.button("⚡ 生成示例数据集并体验").clicked() {
+                                self.generate_and_load_samples(ctx.clone());
+                            }
                             ui.add_space(14.0);
                             ui.label(
                                 RichText::new(
-                                    "提示：支持直接拖入文件夹或数据集文件；打开多个数据集后可拖拽标签页实现左右/上下分屏并排对比",
+                                    "提示：直接将任意 .sas7bdat / .xpt 文件或文件夹拖入窗口，将自动纳入该目录全部数据集；打开多个数据集后可拖拽标签页上下/左右并排对比",
                                 )
                                 .size(11.8)
                                 .color(pal.text_muted),
@@ -767,7 +843,6 @@ impl SasViewerApp {
                         }
                     }
 
-                    // Keep active_tab_id synced with dock focus
                     if let Some((_, focused_id)) = self.dock_state.find_active_focused() {
                         if self.tabs.contains_key(focused_id) {
                             self.active_tab_id = Some(*focused_id);

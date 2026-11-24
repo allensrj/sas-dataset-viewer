@@ -27,6 +27,8 @@ pub struct AppPalette {
     pub badge_num: Color32,
     pub badge_char: Color32,
     pub bar_fill: Color32,
+    pub bg_search_match: Color32,
+    pub bg_search_current: Color32,
 }
 
 impl AppPalette {
@@ -55,6 +57,8 @@ impl AppPalette {
             badge_num: Color32::from_rgb(37, 99, 235),
             badge_char: Color32::from_rgb(180, 83, 9),
             bar_fill: Color32::from_rgb(147, 197, 253),
+            bg_search_match: Color32::from_rgb(254, 243, 199),
+            bg_search_current: Color32::from_rgb(253, 224, 71),
         }
     }
 
@@ -83,6 +87,8 @@ impl AppPalette {
             badge_num: Color32::from_rgb(96, 165, 250),
             badge_char: Color32::from_rgb(251, 191, 36),
             bar_fill: Color32::from_rgb(59, 130, 246),
+            bg_search_match: Color32::from_rgb(92, 74, 26),
+            bg_search_current: Color32::from_rgb(146, 108, 22),
         }
     }
 

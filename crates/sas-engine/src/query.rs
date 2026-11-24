@@ -10,6 +10,8 @@ pub enum FilterOp {
     // String operators
     StrEq(String),
     StrNeq(String),
+    StrIn(Vec<String>),
+    StrNotIn(Vec<String>),
     StrContains(String),
     StrNotContains(String),
     StrIsEmpty,
@@ -17,6 +19,8 @@ pub enum FilterOp {
     // Numeric operators (evaluated on underlying f64 numeric logic)
     NumEq(f64),
     NumNeq(f64),
+    NumIn { values: Vec<f64>, missing_tags: Vec<u8> },
+    NumNotIn { values: Vec<f64>, missing_tags: Vec<u8> },
     NumGt(f64),
     NumGte(f64),
     NumLt(f64),
@@ -27,17 +31,73 @@ pub enum FilterOp {
     NumEqTaggedMissing(u8),
 }
 
+fn format_str_set_preview(vals: &[String]) -> String {
+    let items: Vec<String> = vals
+        .iter()
+        .take(3)
+        .map(|s| {
+            if s.is_empty() {
+                "(空)".to_string()
+            } else {
+                format!("\"{}\"", s)
+            }
+        })
+        .collect();
+    if vals.len() > 3 {
+        format!("({}, +{}项)", items.join(", "), vals.len() - 3)
+    } else {
+        format!("({})", items.join(", "))
+    }
+}
+
+fn format_num_set_preview(values: &[f64], missing_tags: &[u8], meta: &VariableMeta) -> String {
+    let mut parts: Vec<String> = values
+        .iter()
+        .map(|v| format_numeric_value(*v, meta))
+        .collect();
+    for &t in missing_tags {
+        parts.push(format_missing_tag(t));
+    }
+    let total = parts.len();
+    let head: Vec<String> = parts.into_iter().take(3).collect();
+    if total > 3 {
+        format!("({}, +{}项)", head.join(", "), total - 3)
+    } else {
+        format!("({})", head.join(", "))
+    }
+}
+
 impl FilterOp {
     pub fn display_chip(&self, meta: &VariableMeta) -> String {
         match self {
             FilterOp::StrEq(v) => format!("{} = \"{}\"", meta.name, v),
             FilterOp::StrNeq(v) => format!("{} != \"{}\"", meta.name, v),
+            FilterOp::StrIn(vals) => format!("{} ∈ {}", meta.name, format_str_set_preview(vals)),
+            FilterOp::StrNotIn(vals) => {
+                format!("{} ∉ {}", meta.name, format_str_set_preview(vals))
+            }
             FilterOp::StrContains(v) => format!("{} 包含 \"{}\"", meta.name, v),
             FilterOp::StrNotContains(v) => format!("{} 不包含 \"{}\"", meta.name, v),
             FilterOp::StrIsEmpty => format!("{} 为空", meta.name),
             FilterOp::StrIsNotEmpty => format!("{} 非空", meta.name),
             FilterOp::NumEq(v) => format!("{} = {}", meta.name, format_numeric_value(*v, meta)),
             FilterOp::NumNeq(v) => format!("{} != {}", meta.name, format_numeric_value(*v, meta)),
+            FilterOp::NumIn {
+                values,
+                missing_tags,
+            } => format!(
+                "{} ∈ {}",
+                meta.name,
+                format_num_set_preview(values, missing_tags, meta)
+            ),
+            FilterOp::NumNotIn {
+                values,
+                missing_tags,
+            } => format!(
+                "{} ∉ {}",
+                meta.name,
+                format_num_set_preview(values, missing_tags, meta)
+            ),
             FilterOp::NumGt(v) => format!("{} > {}", meta.name, format_numeric_value(*v, meta)),
             FilterOp::NumGte(v) => format!("{} >= {}", meta.name, format_numeric_value(*v, meta)),
             FilterOp::NumLt(v) => format!("{} < {}", meta.name, format_numeric_value(*v, meta)),
@@ -236,6 +296,8 @@ fn eval_str_op(val: &str, op: &FilterOp, needle_lower: Option<&str>) -> bool {
     match op {
         FilterOp::StrEq(target) => val == target,
         FilterOp::StrNeq(target) => val != target,
+        FilterOp::StrIn(targets) => targets.iter().any(|t| t == val),
+        FilterOp::StrNotIn(targets) => !targets.iter().any(|t| t == val),
         FilterOp::StrContains(_) => {
             let needle = needle_lower.unwrap_or("");
             if needle.is_empty() {
@@ -273,6 +335,26 @@ fn eval_num_op(val: f64, miss: u8, op: &FilterOp) -> bool {
         }
         FilterOp::NumEq(target) => miss == MISSING_VALID && (val - *target).abs() <= EPS,
         FilterOp::NumNeq(target) => miss != MISSING_VALID || (val - *target).abs() > EPS,
+        FilterOp::NumIn {
+            values,
+            missing_tags,
+        } => {
+            if miss == MISSING_VALID {
+                values.iter().any(|t| (val - *t).abs() <= EPS)
+            } else {
+                missing_tags.contains(&miss)
+            }
+        }
+        FilterOp::NumNotIn {
+            values,
+            missing_tags,
+        } => {
+            if miss == MISSING_VALID {
+                !values.iter().any(|t| (val - *t).abs() <= EPS)
+            } else {
+                !missing_tags.contains(&miss)
+            }
+        }
         FilterOp::NumGt(target) => miss == MISSING_VALID && val > *target,
         FilterOp::NumGte(target) => miss == MISSING_VALID && val >= *target - EPS,
         FilterOp::NumLt(target) => miss == MISSING_VALID && val < *target,
@@ -386,6 +468,109 @@ pub fn build_cell_equals_filter(table: &ColumnarTable, row: usize, col_idx: usiz
                 Some(FilterOp::NumEq(nc.values[row]))
             } else {
                 Some(FilterOp::NumEqTaggedMissing(tag))
+            }
+        }
+    }
+}
+
+/// Build an inclusive (`in` / `=`) or exclusive (`not in` / `!=`) FilterOp from multiple rows in `col_idx`.
+pub fn build_multi_cell_filter(
+    table: &ColumnarTable,
+    rows: &[usize],
+    col_idx: usize,
+    negate: bool,
+) -> Option<FilterOp> {
+    if rows.is_empty() {
+        return None;
+    }
+    let col = table.columns.get(col_idx)?;
+    match col {
+        ColumnData::String(sc) => {
+            let mut uniq: Vec<String> = Vec::new();
+            for &r in rows {
+                if r < sc.len() {
+                    let s = sc.get_str(r).to_string();
+                    if !uniq.contains(&s) {
+                        uniq.push(s);
+                    }
+                }
+            }
+            if uniq.is_empty() {
+                return None;
+            }
+            if uniq.len() == 1 {
+                let s = uniq.remove(0);
+                if s.is_empty() {
+                    Some(if negate {
+                        FilterOp::StrIsNotEmpty
+                    } else {
+                        FilterOp::StrIsEmpty
+                    })
+                } else {
+                    Some(if negate {
+                        FilterOp::StrNeq(s)
+                    } else {
+                        FilterOp::StrEq(s)
+                    })
+                }
+            } else {
+                Some(if negate {
+                    FilterOp::StrNotIn(uniq)
+                } else {
+                    FilterOp::StrIn(uniq)
+                })
+            }
+        }
+        ColumnData::Numeric(nc) => {
+            let mut values: Vec<f64> = Vec::new();
+            let mut missing_tags: Vec<u8> = Vec::new();
+            for &r in rows {
+                if r < nc.len() {
+                    let tag = nc.missing_tag(r);
+                    if tag == MISSING_VALID {
+                        let v = nc.values[r];
+                        if !values.iter().any(|x| (x - v).abs() <= 1e-11) {
+                            values.push(v);
+                        }
+                    } else if !missing_tags.contains(&tag) {
+                        missing_tags.push(tag);
+                    }
+                }
+            }
+            let total = values.len() + missing_tags.len();
+            if total == 0 {
+                return None;
+            }
+            if total == 1 {
+                if let Some(&v) = values.first() {
+                    Some(if negate {
+                        FilterOp::NumNeq(v)
+                    } else {
+                        FilterOp::NumEq(v)
+                    })
+                } else {
+                    let tag = missing_tags[0];
+                    Some(if negate {
+                        FilterOp::NumNotIn {
+                            values: Vec::new(),
+                            missing_tags: vec![tag],
+                        }
+                    } else {
+                        FilterOp::NumEqTaggedMissing(tag)
+                    })
+                }
+            } else {
+                Some(if negate {
+                    FilterOp::NumNotIn {
+                        values,
+                        missing_tags,
+                    }
+                } else {
+                    FilterOp::NumIn {
+                        values,
+                        missing_tags,
+                    }
+                })
             }
         }
     }

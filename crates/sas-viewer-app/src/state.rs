@@ -1,12 +1,15 @@
 use sas_engine::{
-    build_cell_equals_filter, compute_column_stats, compute_visible_rows, load_dataset_streaming,
-    parse_numeric_or_date_input, ColumnStats, ColumnarTable, EncodingChoice, FilterOp, LoadEvent,
-    VarType, ViewQuery,
+    build_multi_cell_filter, compute_column_stats, compute_visible_rows, load_dataset_streaming,
+    parse_numeric_or_date_input, ColumnData, ColumnStats, ColumnarTable, EncodingChoice, FilterOp,
+    LoadEvent, StringColumn, VarType, ViewQuery,
 };
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
+
+const MAX_SEARCH_MATCHES: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightTab {
@@ -16,13 +19,24 @@ pub enum RightTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusRegion {
+    DataGrid,
+    StatsList,
+    VarList,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterDialogOpKind {
     StrEq,
     StrNeq,
+    StrIn,
+    StrNotIn,
     StrContains,
     StrNotContains,
     NumEq,
     NumNeq,
+    NumIn,
+    NumNotIn,
     NumGt,
     NumGte,
     NumLt,
@@ -35,6 +49,8 @@ impl FilterDialogOpKind {
         match self {
             Self::StrEq | Self::NumEq => "等于 (=)",
             Self::StrNeq | Self::NumNeq => "不等于 (!=)",
+            Self::StrIn | Self::NumIn => "属于多个值 (In, 逗号分隔)",
+            Self::StrNotIn | Self::NumNotIn => "不属于多个值 (Not In)",
             Self::StrContains => "包含 (Contains)",
             Self::StrNotContains => "不包含 (Not Contains)",
             Self::NumGt => "大于 (>)",
@@ -79,8 +95,10 @@ pub struct DatasetTabState {
     pub column_widths: Vec<f32>,
 
     // Selection & cross-panel focus
-    pub selected_cell: Option<(usize, usize)>, // (visible_row_idx, orig_col_idx)
-    pub selected_var: Option<usize>,           // orig_col_idx
+    pub focus_region: FocusRegion,
+    pub selected_cell: Option<(usize, usize)>,       // primary / anchor (visible_row_idx, orig_col_idx)
+    pub selected_cells: BTreeSet<(usize, usize)>,    // multi-cell selection set
+    pub selected_var: Option<usize>,                 // orig_col_idx
     pub scroll_to_col: Option<usize>,
     pub scroll_to_row: Option<usize>,
 
@@ -88,6 +106,16 @@ pub struct DatasetTabState {
     pub stats_col: Option<usize>,
     pub stats_cache_key: Option<(u64, usize)>,
     pub cached_stats: Option<ColumnStats>,
+    pub stats_selected_indices: BTreeSet<usize>,
+    pub stats_anchor_idx: Option<usize>,
+
+    // In-dataset cell value search (Top toolbar Search box + Prev/Next)
+    pub search_query: String,
+    pub search_executed_query: String,
+    pub search_filter_version: u64,
+    pub search_matches: Vec<(usize, usize)>, // (visible_row_idx, orig_col_idx)
+    pub search_current_idx: Option<usize>,
+    pub search_truncated: bool,
 
     // UI transient state
     pub var_search: String,
@@ -123,13 +151,23 @@ impl DatasetTabState {
             column_order: Vec::new(),
             column_visible: Vec::new(),
             column_widths: Vec::new(),
+            focus_region: FocusRegion::DataGrid,
             selected_cell: None,
+            selected_cells: BTreeSet::new(),
             selected_var: None,
             scroll_to_col: None,
             scroll_to_row: None,
             stats_col: None,
             stats_cache_key: None,
             cached_stats: None,
+            stats_selected_indices: BTreeSet::new(),
+            stats_anchor_idx: None,
+            search_query: String::new(),
+            search_executed_query: String::new(),
+            search_filter_version: u64::MAX,
+            search_matches: Vec::new(),
+            search_current_idx: None,
+            search_truncated: false,
             var_search: String::new(),
             filter_dialog: None,
             dragging_col: None,
@@ -141,7 +179,6 @@ impl DatasetTabState {
     }
 
     pub fn start_loading(&mut self, repaint_ctx: Option<egui::Context>) {
-        // Cancel any previous loader
         self.cancel_flag.store(true, Ordering::Relaxed);
         self.cancel_flag = Arc::new(AtomicBool::new(false));
         self.loading = true;
@@ -180,12 +217,14 @@ impl DatasetTabState {
         self.visible_rows.clear();
         self.query.clear();
         self.selected_cell = None;
+        self.selected_cells.clear();
         self.cached_stats = None;
         self.stats_cache_key = None;
+        self.stats_selected_indices.clear();
+        self.clear_cell_search();
         self.start_loading(Some(ctx));
     }
 
-    /// Poll background loader channel; returns true if state changed.
     pub fn poll_loader(&mut self) -> bool {
         let events: Vec<LoadEvent> = {
             let Some(rx) = &self.loader_rx else {
@@ -205,7 +244,7 @@ impl DatasetTabState {
             match ev {
                 LoadEvent::FirstBatch(snap) => {
                     self.rows_loaded_so_far = snap.row_count;
-                    self.install_table(snap, false);
+                    self.install_table(snap);
                 }
                 LoadEvent::Progress {
                     rows_loaded,
@@ -218,7 +257,7 @@ impl DatasetTabState {
                     self.rows_loaded_so_far = full.row_count;
                     self.load_progress = 1.0;
                     self.loading = false;
-                    self.install_table(full, true);
+                    self.install_table(full);
                     finished = true;
                 }
                 LoadEvent::Error(msg) => {
@@ -234,20 +273,19 @@ impl DatasetTabState {
         true
     }
 
-    fn install_table(&mut self, table: Arc<ColumnarTable>, is_final: bool) {
+    fn install_table(&mut self, table: Arc<ColumnarTable>) {
         let ncols = table.variables.len();
         let need_init_cols = self.column_order.len() != ncols;
         if need_init_cols {
             self.column_order = (0..ncols).collect();
             self.column_visible = vec![true; ncols];
+            // Reasonable initial width strictly in [6, 26] chars (~64px .. 216px)
             self.column_widths = (0..ncols)
-                .map(|c| table.estimate_column_width_px(c, 74.0, 230.0, false))
+                .map(|c| table.estimate_column_width_px(c, 6, 26, false))
                 .collect();
             if ncols > 0 && self.selected_var.is_none() {
                 self.selected_var = Some(0);
             }
-        } else if is_final {
-            // Re-estimate widths smoothly only if user hasn't customized? Keep existing widths to avoid jump!
         }
 
         self.table = Some(table);
@@ -264,22 +302,35 @@ impl DatasetTabState {
         self.last_query_ms = t0.elapsed().as_millis() as u64;
         self.filter_version = self.filter_version.wrapping_add(1);
 
-        // Clamp selected cell row into new visible_rows range
+        // Clamp / clear stale row selections
+        let nrows = self.visible_rows.len();
+        self.selected_cells.retain(|&(r, _)| r < nrows);
         if let Some((row, col)) = self.selected_cell {
-            if self.visible_rows.is_empty() {
+            if nrows == 0 {
                 self.selected_cell = None;
-            } else if row >= self.visible_rows.len() {
-                self.selected_cell = Some((self.visible_rows.len() - 1, col));
+            } else if row >= nrows {
+                let clamped = (nrows - 1, col);
+                self.selected_cell = Some(clamped);
+                self.selected_cells.insert(clamped);
             }
         }
 
-        // Automatically refresh stats if stats panel is viewing a variable
+        // Refresh stats if viewing a variable (and clear stale stats row selection)
+        self.stats_selected_indices.clear();
+        self.stats_anchor_idx = None;
         if let Some(scol) = self.stats_col {
             self.refresh_stats_for(scol);
         }
+
+        // Re-run active value search if user had an active search query
+        if !self.search_query.trim().is_empty() && !self.search_executed_query.is_empty() {
+            self.run_cell_search(false);
+        } else {
+            self.search_matches.clear();
+            self.search_current_idx = None;
+        }
     }
 
-    /// Currently visible column indices in display order.
     pub fn visible_columns(&self) -> Vec<usize> {
         self.column_order
             .iter()
@@ -288,7 +339,6 @@ impl DatasetTabState {
             .collect()
     }
 
-    /// Resolve which variable is currently targeted by keyboard shortcuts (`F`, `D`, `Alt+←/→`).
     pub fn active_target_col(&self) -> Option<usize> {
         if let Some((_, col)) = self.selected_cell {
             Some(col)
@@ -297,7 +347,85 @@ impl DatasetTabState {
         }
     }
 
-    /// Compute/show stats for `col_idx` on currently filtered `visible_rows`.
+    // ===== Multi-Cell Selection Helpers =====
+
+    pub fn select_single_cell(&mut self, vis_r: usize, orig_col: usize) {
+        self.selected_cells.clear();
+        self.selected_cells.insert((vis_r, orig_col));
+        self.selected_cell = Some((vis_r, orig_col));
+        self.selected_var = Some(orig_col);
+        self.focus_region = FocusRegion::DataGrid;
+    }
+
+    pub fn toggle_cell_selection(&mut self, vis_r: usize, orig_col: usize) {
+        let cell = (vis_r, orig_col);
+        if self.selected_cells.contains(&cell) && self.selected_cells.len() > 1 {
+            self.selected_cells.remove(&cell);
+        } else {
+            self.selected_cells.insert(cell);
+        }
+        self.selected_cell = Some(cell);
+        self.selected_var = Some(orig_col);
+        self.focus_region = FocusRegion::DataGrid;
+    }
+
+    pub fn select_cell_range_to(&mut self, vis_r: usize, orig_col: usize) {
+        let Some((anchor_r, anchor_col)) = self.selected_cell else {
+            self.select_single_cell(vis_r, orig_col);
+            return;
+        };
+        let r_lo = anchor_r.min(vis_r);
+        let r_hi = anchor_r.max(vis_r);
+        self.selected_cells.clear();
+
+        if anchor_col == orig_col {
+            for r in r_lo..=r_hi {
+                self.selected_cells.insert((r, orig_col));
+            }
+        } else {
+            let vis_cols = self.visible_columns();
+            let c1 = vis_cols.iter().position(|&c| c == anchor_col);
+            let c2 = vis_cols.iter().position(|&c| c == orig_col);
+            if let (Some(i1), Some(i2)) = (c1, c2) {
+                let c_lo = i1.min(i2);
+                let c_hi = i1.max(i2);
+                for r in r_lo..=r_hi {
+                    for &c in &vis_cols[c_lo..=c_hi] {
+                        self.selected_cells.insert((r, c));
+                    }
+                }
+            } else {
+                self.selected_cells.insert((vis_r, orig_col));
+            }
+        }
+        self.selected_var = Some(orig_col);
+        self.focus_region = FocusRegion::DataGrid;
+    }
+
+    /// Collect all selected original dataset row indices belonging to `col_idx`.
+    pub fn selected_orig_rows_for_col(&self, col_idx: usize) -> Vec<usize> {
+        let mut rows = Vec::new();
+        for &(vis_r, c) in &self.selected_cells {
+            if c == col_idx {
+                if let Some(&orig) = self.visible_rows.get(vis_r) {
+                    rows.push(orig as usize);
+                }
+            }
+        }
+        if rows.is_empty() {
+            if let Some((vis_r, c)) = self.selected_cell {
+                if c == col_idx {
+                    if let Some(&orig) = self.visible_rows.get(vis_r) {
+                        rows.push(orig as usize);
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    // ===== Statistics & Multi-Value Stats Selection =====
+
     pub fn refresh_stats_for(&mut self, col_idx: usize) {
         let Some(table) = &self.table else {
             return;
@@ -305,31 +433,156 @@ impl DatasetTabState {
         if col_idx >= table.variables.len() {
             return;
         }
+        let col_changed = self.stats_col != Some(col_idx);
         self.stats_col = Some(col_idx);
         let key = (self.filter_version, col_idx);
         if self.stats_cache_key == Some(key) && self.cached_stats.is_some() {
             return;
         }
+        if col_changed {
+            self.stats_selected_indices.clear();
+            self.stats_anchor_idx = None;
+        }
         self.cached_stats = compute_column_stats(table, &self.visible_rows, col_idx);
         self.stats_cache_key = Some(key);
     }
 
-    /// Shortcut `D`: quick `=` filter.
-    /// - If a cell is selected: immediately filter `col = cell_value` (AND across different cols, replaces same col).
-    /// - If only a variable is selected (from right variable panel): open focused quick `=` dialog.
-    pub fn trigger_quick_d_filter(&mut self) -> bool {
-        let Some(table) = &self.table else {
-            return false;
-        };
-        if let Some((vis_row, col_idx)) = self.selected_cell {
-            if let Some(&orig_row) = self.visible_rows.get(vis_row) {
-                if let Some(op) = build_cell_equals_filter(table, orig_row as usize, col_idx) {
+    /// Build inclusive (`=` / `in`) or exclusive (`!=` / `not in`) FilterOp from selected rows in the Statistics list.
+    pub fn build_stats_selection_filter(&self, negate: bool) -> Option<(usize, FilterOp)> {
+        let col_idx = self.stats_col?;
+        let stats = self.cached_stats.as_ref()?;
+        if self.stats_selected_indices.is_empty() {
+            return None;
+        }
+
+        match stats {
+            ColumnStats::String(ss) => {
+                let mut vals: Vec<String> = Vec::new();
+                for &idx in &self.stats_selected_indices {
+                    if let Some(entry) = ss.frequencies.get(idx) {
+                        let raw = if entry.is_missing {
+                            String::new()
+                        } else {
+                            entry.value.clone()
+                        };
+                        if !vals.contains(&raw) {
+                            vals.push(raw);
+                        }
+                    }
+                }
+                if vals.is_empty() {
+                    return None;
+                }
+                let op = if vals.len() == 1 {
+                    let s = vals.remove(0);
+                    if s.is_empty() {
+                        if negate {
+                            FilterOp::StrIsNotEmpty
+                        } else {
+                            FilterOp::StrIsEmpty
+                        }
+                    } else if negate {
+                        FilterOp::StrNeq(s)
+                    } else {
+                        FilterOp::StrEq(s)
+                    }
+                } else if negate {
+                    FilterOp::StrNotIn(vals)
+                } else {
+                    FilterOp::StrIn(vals)
+                };
+                Some((col_idx, op))
+            }
+            ColumnStats::Numeric(ns) => {
+                let mut values: Vec<f64> = Vec::new();
+                let mut missing_tags: Vec<u8> = Vec::new();
+                for &idx in &self.stats_selected_indices {
+                    if let Some(entry) = ns.frequencies.get(idx) {
+                        if entry.is_missing {
+                            if !missing_tags.contains(&entry.missing_tag) {
+                                missing_tags.push(entry.missing_tag);
+                            }
+                        } else if let Some(v) = entry.raw_numeric {
+                            if !values.iter().any(|x| (x - v).abs() <= 1e-11) {
+                                values.push(v);
+                            }
+                        }
+                    }
+                }
+                let total = values.len() + missing_tags.len();
+                if total == 0 {
+                    return None;
+                }
+                let op = if total == 1 {
+                    if let Some(&v) = values.first() {
+                        if negate {
+                            FilterOp::NumNeq(v)
+                        } else {
+                            FilterOp::NumEq(v)
+                        }
+                    } else {
+                        let tag = missing_tags[0];
+                        if negate {
+                            FilterOp::NumNotIn {
+                                values: Vec::new(),
+                                missing_tags: vec![tag],
+                            }
+                        } else {
+                            FilterOp::NumEqTaggedMissing(tag)
+                        }
+                    }
+                } else if negate {
+                    FilterOp::NumNotIn {
+                        values,
+                        missing_tags,
+                    }
+                } else {
+                    FilterOp::NumIn {
+                        values,
+                        missing_tags,
+                    }
+                };
+                Some((col_idx, op))
+            }
+        }
+    }
+
+    /// Shortcut `D`: unified quick `=` / `IN` filter across DataGrid, StatsList, and VarList!
+    pub fn trigger_quick_d_filter(&mut self) -> Option<String> {
+        let table = self.table.clone()?;
+
+        // 1. If focused in Statistics frequency list & items are selected -> filter by selected value(s)!
+        if self.focus_region == FocusRegion::StatsList && !self.stats_selected_indices.is_empty() {
+            if let Some((col_idx, op)) = self.build_stats_selection_filter(false) {
+                let n_sel = self.stats_selected_indices.len();
+                self.query.set_quick_filter_for_column(col_idx, op);
+                self.recompute_view();
+                return Some(if n_sel > 1 {
+                    format!("已按统计栏选中的 {} 个值执行筛选", n_sel)
+                } else {
+                    "已按统计栏选中值执行等值 (=) 筛选".to_string()
+                });
+            }
+        }
+
+        // 2. If focused in DataGrid -> filter by single or multiple selected cells in active column!
+        if self.focus_region == FocusRegion::DataGrid {
+            if let Some((_, col_idx)) = self.selected_cell {
+                let orig_rows = self.selected_orig_rows_for_col(col_idx);
+                if let Some(op) = build_multi_cell_filter(&table, &orig_rows, col_idx, false) {
+                    let multi = matches!(op, FilterOp::StrIn(_) | FilterOp::NumIn { .. });
                     self.query.set_quick_filter_for_column(col_idx, op);
                     self.recompute_view();
-                    return true;
+                    return Some(if multi {
+                        "已按多选单元格值执行多值筛选".to_string()
+                    } else {
+                        "已应用快速等值 (=) 筛选".to_string()
+                    });
                 }
             }
         }
+
+        // 3. Fallback (VarList): open focused quick filter dialog for selected variable
         if let Some(col_idx) = self.selected_var {
             if let Some(meta) = table.variables.get(col_idx) {
                 let op_kind = match meta.var_type {
@@ -345,13 +598,12 @@ impl DatasetTabState {
                     error_msg: None,
                     just_opened: true,
                 });
-                return true;
+                return Some(format!("请输入 {} 的筛选值", meta.name));
             }
         }
-        false
+        None
     }
 
-    /// Shortcut `C`: clear all filters and sorts.
     pub fn clear_all_filters_and_sorts(&mut self) {
         if !self.query.is_empty() {
             self.query.clear();
@@ -359,21 +611,18 @@ impl DatasetTabState {
         }
     }
 
-    /// Shortcut `H`: uncheck all variables (hide all columns).
     pub fn hide_all_variables(&mut self) {
         for v in &mut self.column_visible {
             *v = false;
         }
     }
 
-    /// Shortcut `U`: check all variables (show all columns).
     pub fn show_all_variables(&mut self) {
         for v in &mut self.column_visible {
             *v = true;
         }
     }
 
-    /// Move target column left (-1) or right (+1) among visible columns (and sync `column_order`).
     pub fn move_column_by(&mut self, col_idx: usize, delta: isize) -> bool {
         let vis = self.visible_columns();
         let Some(vis_pos) = vis.iter().position(|&c| c == col_idx) else {
@@ -395,7 +644,6 @@ impl DatasetTabState {
         true
     }
 
-    /// Reorder column `src_col` to the position of `dst_col` in `column_order`.
     pub fn reorder_column(&mut self, src_col: usize, dst_col: usize) {
         if src_col == dst_col {
             return;
@@ -411,21 +659,22 @@ impl DatasetTabState {
         self.column_order.insert(insert_idx, item);
     }
 
+    /// Auto-fit single column strictly to data max width, clamped to [6, 30] ASCII chars.
     pub fn auto_fit_column(&mut self, col_idx: usize) {
         if let Some(table) = &self.table {
             if col_idx < self.column_widths.len() {
-                self.column_widths[col_idx] =
-                    table.estimate_column_width_px(col_idx, 60.0, 520.0, true);
+                self.column_widths[col_idx] = table.estimate_column_width_px(col_idx, 6, 30, true);
             }
         }
     }
 
+    /// Batch auto-fit all visible columns strictly to data max width, clamped to [6, 30] ASCII chars.
     pub fn auto_fit_all_visible_columns(&mut self) {
         if let Some(table) = &self.table {
             for col_idx in self.visible_columns() {
                 if col_idx < self.column_widths.len() {
                     self.column_widths[col_idx] =
-                        table.estimate_column_width_px(col_idx, 60.0, 480.0, true);
+                        table.estimate_column_width_px(col_idx, 6, 30, true);
                 }
             }
         }
@@ -434,13 +683,158 @@ impl DatasetTabState {
     pub fn reset_all_column_widths(&mut self) {
         if let Some(table) = &self.table {
             for col_idx in 0..self.column_widths.len() {
-                self.column_widths[col_idx] =
-                    table.estimate_column_width_px(col_idx, 74.0, 230.0, false);
+                self.column_widths[col_idx] = table.estimate_column_width_px(col_idx, 6, 26, false);
             }
         }
     }
 
-    /// Apply filter from custom dialog.
+    // ===== Fast In-Dataset Cell Value Search =====
+
+    pub fn clear_cell_search(&mut self) {
+        self.search_query.clear();
+        self.search_executed_query.clear();
+        self.search_matches.clear();
+        self.search_current_idx = None;
+        self.search_truncated = false;
+    }
+
+    /// Search across visible rows × visible columns for case-insensitive substring match.
+    pub fn run_cell_search(&mut self, jump_to_first: bool) {
+        let needle_raw = self.search_query.trim().to_string();
+        if needle_raw.is_empty() {
+            self.search_executed_query.clear();
+            self.search_matches.clear();
+            self.search_current_idx = None;
+            self.search_truncated = false;
+            return;
+        }
+        let Some(table) = self.table.clone() else {
+            return;
+        };
+
+        let needle = needle_raw.to_lowercase();
+        let vis_cols = self.visible_columns();
+        let mut matches: Vec<(usize, usize)> = Vec::new();
+        let mut truncated = false;
+
+        // Precompute dictionary masks for Dict string columns so scanning 200k rows is near-instant!
+        enum ColMatcher<'a> {
+            Dict(&'a [u32], Vec<bool>),
+            Flat(&'a StringColumn),
+            Numeric(usize),
+        }
+
+        let matchers: Vec<(usize, ColMatcher<'_>)> = vis_cols
+            .iter()
+            .filter_map(|&c| {
+                let col = table.columns.get(c)?;
+                let m = match col {
+                    ColumnData::String(sc) => match sc {
+                        StringColumn::Dict { dict, ids, .. } => {
+                            let mask: Vec<bool> = dict
+                                .iter()
+                                .map(|s| !s.is_empty() && s.to_lowercase().contains(&needle))
+                                .collect();
+                            if !mask.iter().any(|&b| b) {
+                                return None; // Skip entire column in O(1)!
+                            }
+                            ColMatcher::Dict(ids, mask)
+                        }
+                        StringColumn::Flat { .. } => ColMatcher::Flat(sc),
+                    },
+                    ColumnData::Numeric(_) => ColMatcher::Numeric(c),
+                };
+                Some((c, m))
+            })
+            .collect();
+
+        'outer: for (vis_r, &orig_u32) in self.visible_rows.iter().enumerate() {
+            let orig_r = orig_u32 as usize;
+            for &(col_idx, ref matcher) in &matchers {
+                let hit = match matcher {
+                    ColMatcher::Dict(ids, mask) => mask[ids[orig_r] as usize],
+                    ColMatcher::Flat(sc) => sc.get_str(orig_r).to_lowercase().contains(&needle),
+                    ColMatcher::Numeric(c) => table
+                        .format_cell(orig_r, *c)
+                        .to_lowercase()
+                        .contains(&needle),
+                };
+                if hit {
+                    matches.push((vis_r, col_idx));
+                    if matches.len() >= MAX_SEARCH_MATCHES {
+                        truncated = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        self.search_executed_query = needle_raw;
+        self.search_filter_version = self.filter_version;
+        self.search_matches = matches;
+        self.search_truncated = truncated;
+
+        if self.search_matches.is_empty() {
+            self.search_current_idx = None;
+        } else if jump_to_first {
+            self.jump_to_search_match(0);
+        } else {
+            self.search_current_idx = Some(0);
+        }
+    }
+
+    pub fn search_next(&mut self) {
+        if self.search_query.trim().is_empty() {
+            return;
+        }
+        if self.search_executed_query != self.search_query.trim()
+            || self.search_filter_version != self.filter_version
+        {
+            self.run_cell_search(true);
+            return;
+        }
+        let n = self.search_matches.len();
+        if n == 0 {
+            return;
+        }
+        let next = match self.search_current_idx {
+            Some(cur) => (cur + 1) % n,
+            None => 0,
+        };
+        self.jump_to_search_match(next);
+    }
+
+    pub fn search_prev(&mut self) {
+        if self.search_query.trim().is_empty() {
+            return;
+        }
+        if self.search_executed_query != self.search_query.trim()
+            || self.search_filter_version != self.filter_version
+        {
+            self.run_cell_search(true);
+            return;
+        }
+        let n = self.search_matches.len();
+        if n == 0 {
+            return;
+        }
+        let prev = match self.search_current_idx {
+            Some(0) | None => n - 1,
+            Some(cur) => cur - 1,
+        };
+        self.jump_to_search_match(prev);
+    }
+
+    fn jump_to_search_match(&mut self, match_idx: usize) {
+        if let Some(&(vis_r, col_idx)) = self.search_matches.get(match_idx) {
+            self.search_current_idx = Some(match_idx);
+            self.select_single_cell(vis_r, col_idx);
+            self.scroll_to_row = Some(vis_r);
+            self.scroll_to_col = Some(col_idx);
+        }
+    }
+
+    /// Apply filter from custom dialog (supports single & comma/newline-separated multi-value In/NotIn!).
     pub fn apply_filter_dialog(&mut self) -> bool {
         let Some(dlg) = &self.filter_dialog else {
             return false;
@@ -452,12 +846,74 @@ impl DatasetTabState {
             return false;
         };
 
+        let parse_str_list = |raw: &str| -> Vec<String> {
+            raw.split(|c| c == ',' || c == '，' || c == '\n' || c == ';')
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+
         let op_res: Result<FilterOp, String> = match dlg.op_kind {
             FilterDialogOpKind::StrEq => Ok(FilterOp::StrEq(dlg.input_primary.clone())),
             FilterDialogOpKind::StrNeq => Ok(FilterOp::StrNeq(dlg.input_primary.clone())),
+            FilterDialogOpKind::StrIn => {
+                let vals = parse_str_list(&dlg.input_primary);
+                if vals.is_empty() {
+                    Err("请输入至少一个值（多个值可用逗号分隔）".to_string())
+                } else {
+                    Ok(FilterOp::StrIn(vals))
+                }
+            }
+            FilterDialogOpKind::StrNotIn => {
+                let vals = parse_str_list(&dlg.input_primary);
+                if vals.is_empty() {
+                    Err("请输入至少一个值（多个值可用逗号分隔）".to_string())
+                } else {
+                    Ok(FilterOp::StrNotIn(vals))
+                }
+            }
             FilterDialogOpKind::StrContains => Ok(FilterOp::StrContains(dlg.input_primary.clone())),
             FilterDialogOpKind::StrNotContains => {
                 Ok(FilterOp::StrNotContains(dlg.input_primary.clone()))
+            }
+            FilterDialogOpKind::NumIn | FilterDialogOpKind::NumNotIn => {
+                let tokens = parse_str_list(&dlg.input_primary);
+                let mut values = Vec::new();
+                let mut missing_tags = Vec::new();
+                let mut parse_err: Option<String> = None;
+                for tok in &tokens {
+                    if tok == "." {
+                        missing_tags.push(sas_engine::MISSING_SYSTEM);
+                    } else if tok.len() == 2 && tok.starts_with('.') {
+                        let ch = tok.as_bytes()[1].to_ascii_uppercase();
+                        if ch.is_ascii_uppercase() || ch == b'_' {
+                            missing_tags.push(ch);
+                        } else {
+                            parse_err = Some(format!("无法识别的数值/缺失值: {tok}"));
+                            break;
+                        }
+                    } else if let Some(v) = parse_numeric_or_date_input(tok, meta.date_kind) {
+                        values.push(v);
+                    } else {
+                        parse_err = Some(format!("无法识别的数值或日期: {tok}"));
+                        break;
+                    }
+                }
+                if let Some(err) = parse_err {
+                    Err(err)
+                } else if values.is_empty() && missing_tags.is_empty() {
+                    Err("请输入至少一个数值（多个值可用逗号分隔）".to_string())
+                } else if dlg.op_kind == FilterDialogOpKind::NumIn {
+                    Ok(FilterOp::NumIn {
+                        values,
+                        missing_tags,
+                    })
+                } else {
+                    Ok(FilterOp::NumNotIn {
+                        values,
+                        missing_tags,
+                    })
+                }
             }
             FilterDialogOpKind::NumEq
             | FilterDialogOpKind::NumNeq

@@ -8,7 +8,10 @@ pub mod writer;
 
 pub use column::{ColumnData, ColumnarTable, NumericColumn, StringColumn, MISSING_SYSTEM, MISSING_VALID};
 pub use loader::{load_dataset_streaming, load_dataset_sync, LoadError, LoadEvent};
-pub use query::{build_cell_equals_filter, compute_visible_rows, FilterCondition, FilterOp, SortKey, ViewQuery};
+pub use query::{
+    build_cell_equals_filter, build_multi_cell_filter, compute_visible_rows, FilterCondition,
+    FilterOp, SortKey, ViewQuery,
+};
 pub use sas_format::{format_missing_tag, format_numeric_value, format_plain_number, parse_numeric_or_date_input, parse_sas_format};
 pub use stats::{compute_column_stats, ColumnStats, FreqEntry, NumericStats, StringStats};
 pub use types::{DatasetMetadata, EncodingChoice, SasDateKind, SasFormatKind, VarType, VariableMeta};
@@ -251,6 +254,46 @@ mod tests {
         // 5. Clear all (C) restores all 150 rows
         q2.clear();
         assert_eq!(compute_visible_rows(&table, &q2).len(), 150);
+
+        // 6. Multi-value StrIn & NumIn filters
+        let mut q3 = ViewQuery::default();
+        q3.add_filter(
+            1,
+            FilterOp::StrIn(vec![
+                "试验组 A (100mg)".into(),
+                "安慰剂组 Placebo".into(),
+            ]),
+        );
+        let rows_in = compute_visible_rows(&table, &q3);
+        assert_eq!(rows_in.len(), 100);
+
+        let mut q4 = ViewQuery::default();
+        q4.add_filter(
+            3,
+            FilterOp::NumIn {
+                values: vec![20.0, 21.0],
+                missing_tags: vec![b'A'],
+            },
+        );
+        let rows_num_in = compute_visible_rows(&table, &q4);
+        assert!(rows_num_in.len() >= 5);
+
+        // 7. Numeric stats always populate value frequencies (even when distinct > 25)
+        let all_rows: Vec<u32> = (0..150).collect();
+        let st_num = compute_column_stats(&table, &all_rows, 3).unwrap();
+        match st_num {
+            ColumnStats::Numeric(ns) => {
+                assert!(ns.distinct_count > 25);
+                assert!(!ns.frequencies.is_empty());
+            }
+            _ => panic!("expected numeric stats"),
+        }
+
+        // 8. Auto-fit width respects [6, 30] ASCII char bounds strictly from data
+        let w_sex = table.estimate_column_width_px(2, 6, 30, true); // "M"/"F" -> floor 6 chars (~63.6px)
+        assert!((w_sex - (6.0 * 7.6 + 18.0)).abs() < 0.1);
+        let w_arm = table.estimate_column_width_px(1, 6, 30, true); // <= 30 chars (~246px)
+        assert!(w_arm <= 30.0 * 7.6 + 18.1);
 
         let _ = std::fs::remove_file(&path);
     }

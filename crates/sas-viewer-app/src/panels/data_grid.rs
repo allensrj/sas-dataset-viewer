@@ -5,8 +5,8 @@ use egui::{
     Stroke, Ui, Vec2,
 };
 use sas_engine::{
-    build_cell_equals_filter, format_missing_tag, format_numeric_value, ColumnData, FilterOp,
-    VarType, MISSING_VALID,
+    build_cell_equals_filter, build_multi_cell_filter, format_missing_tag, format_numeric_value,
+    ColumnData, FilterOp, VarType, MISSING_VALID,
 };
 
 const ROW_NUM_WIDTH: f32 = 58.0;
@@ -30,7 +30,6 @@ pub fn show_data_grid(
 ) -> Vec<GridAction> {
     let mut actions = Vec::new();
 
-    // Error state
     if let Some(err) = tab.load_error.clone() {
         ui.centered_and_justified(|ui| {
             ui.vertical_centered(|ui| {
@@ -52,7 +51,6 @@ pub fn show_data_grid(
         return actions;
     }
 
-    // Loading placeholder before FirstBatch arrives
     let Some(table) = tab.table.clone() else {
         ui.centered_and_justified(|ui| {
             ui.horizontal(|ui| {
@@ -67,7 +65,6 @@ pub fn show_data_grid(
         return actions;
     };
 
-    // Subtle streaming progress bar if background loading is still running after FirstBatch
     if tab.loading {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -192,7 +189,6 @@ pub fn show_data_grid(
         return actions;
     }
 
-    // Precompute prefix X offsets of visible columns (excluding frozen row-number column)
     let mut col_x_starts = Vec::with_capacity(vis_cols.len() + 1);
     let mut acc_x = 0.0f32;
     for &c in &vis_cols {
@@ -208,7 +204,6 @@ pub fn show_data_grid(
     let viewport_w = (avail.width() - ROW_NUM_WIDTH).max(40.0);
     let viewport_h = (avail.height() - HEADER_TOTAL_HEIGHT).max(40.0);
 
-    // Handle programmatic scroll-to-col / scroll-to-row (e.g. double-click in Variables panel or keyboard nav)
     if let Some(target_col) = tab.scroll_to_col.take() {
         if let Some(vis_idx) = vis_cols.iter().position(|&c| c == target_col) {
             let cx0 = col_x_starts[vis_idx];
@@ -232,10 +227,8 @@ pub fn show_data_grid(
         }
     }
 
-    // Reserve full grid rect
     let (grid_rect, _) = ui.allocate_exact_size(avail.size(), Sense::hover());
 
-    // Draw subtle active-pane top accent stripe if multiple tabs/splits exist
     if is_active_tab {
         ui.painter().line_segment(
             [grid_rect.left_top(), grid_rect.right_top()],
@@ -243,7 +236,7 @@ pub fn show_data_grid(
         );
     }
 
-    // 1. Paint Frozen Corner Header (#)
+    // 1. Frozen Corner Header (#)
     let corner_rect = Rect::from_min_size(
         grid_rect.min,
         Vec2::new(ROW_NUM_WIDTH, HEADER_TOTAL_HEIGHT),
@@ -282,7 +275,6 @@ pub fn show_data_grid(
         pal.text_muted,
     );
 
-    // Corner context menu for quick batch width actions
     let corner_resp = ui.interact(corner_rect, Id::new(("corner_hdr", tab.id)), Sense::click());
     corner_resp.context_menu(|ui| {
         if ui.button("批量自适应所有可见列宽").clicked() {
@@ -308,7 +300,7 @@ pub fn show_data_grid(
         }
     });
 
-    // 2. Scrollable Body Area (positioned below header and right of row numbers)
+    // 2. Scrollable Body Area
     let body_clip_rect = Rect::from_min_max(
         Pos2::new(
             grid_rect.left() + ROW_NUM_WIDTH,
@@ -330,6 +322,15 @@ pub fn show_data_grid(
     let mut deferred_quick_filter: Option<(usize, FilterOp, bool)> = None;
     let mut deferred_open_filter_dlg: Option<FilterDialogState> = None;
     let mut deferred_clear_all = false;
+
+    let current_search_cell: Option<(usize, usize)> = tab
+        .search_current_idx
+        .and_then(|i| tab.search_matches.get(i).copied());
+    let active_search_lower: Option<String> = if !tab.search_executed_query.is_empty() {
+        Some(tab.search_executed_query.to_lowercase())
+    } else {
+        None
+    };
 
     let mut body_ui = ui.new_child(
         egui::UiBuilder::new()
@@ -362,12 +363,10 @@ pub fn show_data_grid(
                 return;
             }
 
-            // Compute exact visible row range [first_row..end_row)
             let first_row = ((viewport.min.y / ROW_HEIGHT).floor().max(0.0) as usize).min(total_rows);
             let end_row =
                 (((viewport.max.y / ROW_HEIGHT).ceil().max(0.0) as usize) + 1).min(total_rows);
 
-            // Compute exact visible column range via binary search on col_x_starts
             let first_col_vis = col_x_starts
                 .partition_point(|&x| x <= viewport.min.x)
                 .saturating_sub(1);
@@ -379,7 +378,6 @@ pub fn show_data_grid(
             let pointer_pos = ui.ctx().pointer_latest_pos();
             let font_cell = FontId::proportional(12.2);
 
-            // Paint visible rows & cells
             for vis_r in first_row..end_row {
                 let orig_row = tab.visible_rows[vis_r] as usize;
                 let y0 = content_rect.top() + (vis_r as f32) * ROW_HEIGHT;
@@ -411,18 +409,6 @@ pub fn show_data_grid(
                     let x1 = content_rect.left() + col_x_starts[c_vis + 1];
                     let cell_rect = Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1));
 
-                    let is_sel_cell = tab.selected_cell == Some((vis_r, orig_col));
-                    if is_sel_cell {
-                        painter.rect_filled(cell_rect, 0.0, pal.bg_selected_cell);
-                        painter.rect_stroke(
-                            cell_rect.shrink(0.5),
-                            0.0,
-                            Stroke::new(1.5, pal.accent),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-
-                    // Draw cell text
                     let meta = &table.variables[orig_col];
                     let (text, is_missing, align_right) = match &table.columns[orig_col] {
                         ColumnData::Numeric(nc) => {
@@ -442,6 +428,41 @@ pub fn show_data_grid(
                             (s.to_string(), s.is_empty(), false)
                         }
                     };
+
+                    // Search highlight (current match vs other visible matches)
+                    let is_cur_search = current_search_cell == Some((vis_r, orig_col));
+                    let is_any_search = is_cur_search
+                        || active_search_lower
+                            .as_deref()
+                            .map(|needle| !text.is_empty() && text.to_lowercase().contains(needle))
+                            .unwrap_or(false);
+
+                    let is_primary_sel = tab.selected_cell == Some((vis_r, orig_col));
+                    let is_multi_sel = tab.selected_cells.contains(&(vis_r, orig_col));
+
+                    if is_cur_search {
+                        painter.rect_filled(cell_rect, 0.0, pal.bg_search_current);
+                    } else if is_multi_sel || is_primary_sel {
+                        painter.rect_filled(cell_rect, 0.0, pal.bg_selected_cell);
+                    } else if is_any_search {
+                        painter.rect_filled(cell_rect, 0.0, pal.bg_search_match);
+                    }
+
+                    if is_primary_sel {
+                        painter.rect_stroke(
+                            cell_rect.shrink(0.5),
+                            0.0,
+                            Stroke::new(1.6, pal.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    } else if is_multi_sel {
+                        painter.rect_stroke(
+                            cell_rect.shrink(0.5),
+                            0.0,
+                            Stroke::new(1.0, pal.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
 
                     if !text.is_empty() {
                         let cell_clip = painter.with_clip_rect(cell_rect.shrink2(Vec2::new(4.0, 0.0)));
@@ -469,14 +490,12 @@ pub fn show_data_grid(
                         }
                     }
 
-                    // Vertical cell border
                     painter.line_segment(
                         [Pos2::new(x1, y0), Pos2::new(x1, y1)],
                         Stroke::new(1.0, pal.border_grid),
                     );
                 }
 
-                // Horizontal row border
                 painter.line_segment(
                     [
                         Pos2::new(content_rect.left() + viewport.min.x, y1),
@@ -486,7 +505,6 @@ pub fn show_data_grid(
                 );
             }
 
-            // Single interactive hit-test overlay for all visible cells (fast O(1) widget!)
             let visible_body_rect = Rect::from_min_max(
                 Pos2::new(
                     content_rect.left() + viewport.min.x,
@@ -518,16 +536,38 @@ pub fn show_data_grid(
                 Some((vis_r, orig_col))
             };
 
-            if grid_resp.clicked() || grid_resp.secondary_clicked() {
+            if grid_resp.clicked() {
                 if let Some(pos) = grid_resp.interact_pointer_pos() {
                     if let Some((vis_r, orig_col)) = locate_cell(pos) {
-                        tab.selected_cell = Some((vis_r, orig_col));
-                        tab.selected_var = Some(orig_col);
+                        let (ctrl, shift) = ui.input(|i| {
+                            (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift)
+                        });
+                        if shift {
+                            tab.select_cell_range_to(vis_r, orig_col);
+                        } else if ctrl {
+                            tab.toggle_cell_selection(vis_r, orig_col);
+                        } else {
+                            tab.select_single_cell(vis_r, orig_col);
+                        }
                     }
                 }
             }
 
-            // Right-click cell context menu for filtering & linkage!
+            if grid_resp.secondary_clicked() {
+                if let Some(pos) = grid_resp.interact_pointer_pos() {
+                    if let Some((vis_r, orig_col)) = locate_cell(pos) {
+                        if !tab.selected_cells.contains(&(vis_r, orig_col)) {
+                            tab.select_single_cell(vis_r, orig_col);
+                        } else {
+                            // Keep existing multi-cell selection intact for multi-value filtering!
+                            tab.selected_cell = Some((vis_r, orig_col));
+                            tab.selected_var = Some(orig_col);
+                        }
+                    }
+                }
+            }
+
+            // Right-click cell context menu (supports single AND multi-cell selection filtering!)
             grid_resp.context_menu(|ui| {
                 let Some((vis_r, orig_col)) = tab.selected_cell else {
                     ui.label("请先选中一个单元格");
@@ -541,18 +581,60 @@ pub fn show_data_grid(
                 let formatted = table.format_cell(orig_row, orig_col);
                 let preview = truncate_preview(&formatted, 28);
 
-                ui.label(
-                    RichText::new(format!("{} = {}", meta.name, if preview.is_empty() { "(空)" } else { &preview }))
+                // Check whether multiple distinct values are selected in this column
+                let sel_orig_rows = tab.selected_orig_rows_for_col(orig_col);
+                let multi_in_op = build_multi_cell_filter(&table, &sel_orig_rows, orig_col, false);
+                let multi_not_in_op =
+                    build_multi_cell_filter(&table, &sel_orig_rows, orig_col, true);
+                let is_multi_distinct = matches!(
+                    multi_in_op,
+                    Some(FilterOp::StrIn(_)) | Some(FilterOp::NumIn { .. })
+                );
+
+                if is_multi_distinct {
+                    if let Some(op) = &multi_in_op {
+                        ui.label(
+                            RichText::new(format!("已多选: {}", op.display_chip(meta)))
+                                .strong()
+                                .size(12.0)
+                                .color(pal.accent),
+                        );
+                    }
+                    ui.separator();
+                    if let Some(op) = multi_in_op {
+                        if ui.button("筛选: 属于已选多个值  (D)").clicked() {
+                            deferred_quick_filter = Some((orig_col, op, true));
+                            ui.close_menu();
+                        }
+                    }
+                    if let Some(op) = multi_not_in_op {
+                        if ui.button("筛选: 不属于已选多个值").clicked() {
+                            deferred_quick_filter = Some((orig_col, op, false));
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                } else {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} = {}",
+                            meta.name,
+                            if preview.is_empty() { "(空)" } else { &preview }
+                        ))
                         .strong()
                         .size(12.0),
-                );
-                ui.separator();
+                    );
+                    ui.separator();
+                }
 
                 match &table.columns[orig_col] {
                     ColumnData::String(sc) => {
                         let raw_s = sc.get_str(orig_row).to_string();
                         if ui
-                            .button(format!("筛选: 等于 \"{}\"  (D)", truncate_preview(&raw_s, 18)))
+                            .button(format!(
+                                "筛选: 等于 \"{}\"  (D)",
+                                truncate_preview(&raw_s, 18)
+                            ))
                             .clicked()
                         {
                             let op = if raw_s.is_empty() {
@@ -564,7 +646,10 @@ pub fn show_data_grid(
                             ui.close_menu();
                         }
                         if ui
-                            .button(format!("筛选: 不等于 \"{}\"", truncate_preview(&raw_s, 18)))
+                            .button(format!(
+                                "筛选: 不等于 \"{}\"",
+                                truncate_preview(&raw_s, 18)
+                            ))
                             .clicked()
                         {
                             let op = if raw_s.is_empty() {
@@ -573,6 +658,18 @@ pub fn show_data_grid(
                                 FilterOp::StrNeq(raw_s.clone())
                             };
                             deferred_quick_filter = Some((orig_col, op, false));
+                            ui.close_menu();
+                        }
+                        if ui.button("筛选: 属于多个值 (逗号分隔)...").clicked() {
+                            deferred_open_filter_dlg = Some(FilterDialogState {
+                                col_idx: orig_col,
+                                op_kind: FilterDialogOpKind::StrIn,
+                                input_primary: raw_s.clone(),
+                                input_secondary: String::new(),
+                                replace_same_col: true,
+                                error_msg: None,
+                                just_opened: true,
+                            });
                             ui.close_menu();
                         }
                         if ui.button("筛选: 包含 (Contains)...").clicked() {
@@ -649,6 +746,18 @@ pub fn show_data_grid(
                                 ui.close_menu();
                             }
                         }
+                        if ui.button("筛选: 属于多个数值 (逗号分隔)...").clicked() {
+                            deferred_open_filter_dlg = Some(FilterDialogState {
+                                col_idx: orig_col,
+                                op_kind: FilterDialogOpKind::NumIn,
+                                input_primary: formatted.clone(),
+                                input_secondary: String::new(),
+                                replace_same_col: true,
+                                error_msg: None,
+                                just_opened: true,
+                            });
+                            ui.close_menu();
+                        }
                         if ui.button("筛选: 缺失值 (./.A-.Z)").clicked() {
                             deferred_quick_filter = Some((orig_col, FilterOp::NumIsMissing, false));
                             ui.close_menu();
@@ -693,11 +802,10 @@ pub fn show_data_grid(
             });
         });
 
-    // Save current scroll offset for frozen headers & row numbers
     let scroll_offset = scroll_out.state.offset;
     tab.grid_scroll_offset = scroll_offset;
 
-    // 3. Paint Frozen Left Row Numbers synced with scroll_offset.y
+    // 3. Frozen Left Row Numbers
     let row_num_clip = Rect::from_min_max(
         Pos2::new(grid_rect.left(), grid_rect.top() + HEADER_TOTAL_HEIGHT),
         Pos2::new(grid_rect.left() + ROW_NUM_WIDTH, grid_rect.bottom()),
@@ -739,7 +847,7 @@ pub fn show_data_grid(
         Stroke::new(1.0, pal.border_header),
     );
 
-    // 4. Paint Frozen Two-Tier Column Headers synced with scroll_offset.x
+    // 4. Frozen Two-Tier Column Headers
     let hdr_clip = Rect::from_min_max(
         Pos2::new(grid_rect.left() + ROW_NUM_WIDTH, grid_rect.top()),
         Pos2::new(grid_rect.right(), grid_rect.top() + HEADER_TOTAL_HEIGHT),
@@ -784,7 +892,6 @@ pub fn show_data_grid(
         hdr_painter.rect_filled(name_rect, 0.0, name_bg);
         hdr_painter.rect_filled(label_rect, 0.0, pal.bg_header_label);
 
-        // Sort badge & filter indicator
         let sort_info = tab.query.sort_rank(orig_col);
         let has_filter = tab.query.has_filter_on(orig_col);
         let mut right_reserved = 6.0f32;
@@ -816,7 +923,6 @@ pub fn show_data_grid(
             right_reserved += 12.0;
         }
 
-        // Variable Name (Row 1)
         let name_text_clip = Rect::from_min_max(
             Pos2::new(x0 + 5.0, name_rect.top()),
             Pos2::new((x1 - right_reserved).max(x0 + 6.0), name_rect.bottom()),
@@ -830,7 +936,6 @@ pub fn show_data_grid(
             pal.text_primary,
         );
 
-        // Variable Label (Row 2)
         let label_text_clip = label_rect.shrink2(Vec2::new(5.0, 0.0)).intersect(hdr_clip);
         let lbl = if meta.label.is_empty() {
             "-"
@@ -845,7 +950,6 @@ pub fn show_data_grid(
             pal.text_muted,
         );
 
-        // Borders
         hdr_painter.line_segment(
             [name_rect.left_bottom(), name_rect.right_bottom()],
             Stroke::new(1.0, pal.border_grid),
@@ -855,7 +959,6 @@ pub fn show_data_grid(
             Stroke::new(1.0, pal.border_header),
         );
 
-        // Column resize handle on right border (6px wide)
         let resize_rect = Rect::from_min_max(
             Pos2::new(x1 - 4.0, hdr_clip.top()),
             Pos2::new(x1 + 3.0, hdr_clip.bottom()),
@@ -875,7 +978,6 @@ pub fn show_data_grid(
             deferred_resize = Some((orig_col, new_w));
         }
 
-        // Column header click (sort), drag (reorder), tooltip, and right-click context menu
         let interact_rect = Rect::from_min_max(
             Pos2::new(x0 + 2.0, hdr_clip.top()),
             Pos2::new((x1 - 4.0).max(x0 + 3.0), hdr_clip.bottom()),
@@ -897,7 +999,6 @@ pub fn show_data_grid(
             tab.dragging_col = Some(orig_col);
         }
 
-        // Column drag-reorder visual drop indicator
         if let Some(src_col) = tab.dragging_col {
             if src_col != orig_col && hdr_resp.hovered() {
                 hdr_painter.line_segment(
@@ -951,7 +1052,7 @@ pub fn show_data_grid(
             ui.separator();
             if ui.button("筛选此列...").clicked() {
                 let op_kind = match meta.var_type {
-                    VarType::String => FilterDialogOpKind::StrContains,
+                    VarType::String => FilterDialogOpKind::StrIn,
                     VarType::Numeric => FilterDialogOpKind::NumEq,
                 };
                 deferred_open_filter_dlg = Some(FilterDialogState {
@@ -971,7 +1072,7 @@ pub fn show_data_grid(
                 ui.close_menu();
             }
             ui.separator();
-            if ui.button("自适应当前列宽").clicked() {
+            if ui.button("自适应当前列宽 (6~30字符)").clicked() {
                 deferred_autofit_col = Some(orig_col);
                 ui.close_menu();
             }
@@ -999,13 +1100,11 @@ pub fn show_data_grid(
         });
     }
 
-    // Bottom line of frozen header
     hdr_painter.line_segment(
         [hdr_clip.left_bottom(), hdr_clip.right_bottom()],
         Stroke::new(1.2, pal.border_header),
     );
 
-    // Floating badge while dragging column header
     if let Some(src_col) = tab.dragging_col {
         if ui.input(|i| i.pointer.any_released()) {
             tab.dragging_col = None;
@@ -1017,14 +1116,17 @@ pub fn show_data_grid(
                     .interactable(false)
                     .show(ui.ctx(), |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.label(RichText::new(format!("⇄ 移动列: {}", meta.name)).strong().size(11.5));
+                            ui.label(
+                                RichText::new(format!("⇄ 移动列: {}", meta.name))
+                                    .strong()
+                                    .size(11.5),
+                            );
                         });
                     });
             }
         }
     }
 
-    // Apply deferred grid mutations cleanly
     if deferred_clear_all {
         tab.clear_all_filters_and_sorts();
     }
@@ -1077,7 +1179,6 @@ pub fn show_data_grid(
         tab.filter_dialog = Some(dlg);
     }
 
-    // Render custom filter modal dialog if open
     show_filter_dialog(ui.ctx(), tab);
 
     actions
@@ -1117,17 +1218,20 @@ fn show_filter_dialog(ctx: &egui::Context, tab: &mut DatasetTabState) {
             }
             ui.add_space(4.0);
 
-            // Operator selector
             let ops: &[FilterDialogOpKind] = match meta.var_type {
                 VarType::String => &[
                     FilterDialogOpKind::StrEq,
                     FilterDialogOpKind::StrNeq,
+                    FilterDialogOpKind::StrIn,
+                    FilterDialogOpKind::StrNotIn,
                     FilterDialogOpKind::StrContains,
                     FilterDialogOpKind::StrNotContains,
                 ],
                 VarType::Numeric => &[
                     FilterDialogOpKind::NumEq,
                     FilterDialogOpKind::NumNeq,
+                    FilterDialogOpKind::NumIn,
+                    FilterDialogOpKind::NumNotIn,
                     FilterDialogOpKind::NumGt,
                     FilterDialogOpKind::NumGte,
                     FilterDialogOpKind::NumLt,
@@ -1147,12 +1251,18 @@ fn show_filter_dialog(ctx: &egui::Context, tab: &mut DatasetTabState) {
                     });
             });
 
-            let hint = if meta.date_kind.is_temporal() {
-                "输入数值或日期 (如 2025-01-01 / 01JAN2025)"
-            } else if meta.var_type == VarType::Numeric {
-                "输入数值"
-            } else {
-                "输入匹配文本"
+            let hint = match dlg.op_kind {
+                FilterDialogOpKind::StrIn | FilterDialogOpKind::StrNotIn => {
+                    "多个值用逗号分隔，如: Asian, White"
+                }
+                FilterDialogOpKind::NumIn | FilterDialogOpKind::NumNotIn => {
+                    "多个数值用逗号分隔，如: 20, 35, 50"
+                }
+                _ if meta.date_kind.is_temporal() => {
+                    "输入数值或日期 (如 2025-01-01 / 01JAN2025)"
+                }
+                _ if meta.var_type == VarType::Numeric => "输入数值",
+                _ => "输入匹配文本",
             };
 
             ui.horizontal(|ui| {
@@ -1164,7 +1274,7 @@ fn show_filter_dialog(ctx: &egui::Context, tab: &mut DatasetTabState) {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut dlg.input_primary)
                         .hint_text(hint)
-                        .desired_width(240.0),
+                        .desired_width(260.0),
                 );
                 if dlg.just_opened {
                     resp.request_focus();
@@ -1178,13 +1288,17 @@ fn show_filter_dialog(ctx: &egui::Context, tab: &mut DatasetTabState) {
                     ui.add(
                         egui::TextEdit::singleline(&mut dlg.input_secondary)
                             .hint_text(hint)
-                            .desired_width(240.0),
+                            .desired_width(260.0),
                     );
                 });
             }
 
             if let Some(err) = &dlg.error_msg {
-                ui.label(RichText::new(err).color(Color32::from_rgb(210, 60, 60)).size(11.5));
+                ui.label(
+                    RichText::new(err)
+                        .color(Color32::from_rgb(210, 60, 60))
+                        .size(11.5),
+                );
             }
 
             ui.add_space(6.0);

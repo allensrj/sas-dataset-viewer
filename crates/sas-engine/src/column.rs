@@ -366,27 +366,32 @@ impl ColumnarTable {
         self.columns.iter().map(|c| c.approx_memory_bytes()).sum()
     }
 
-    /// Estimate optimal column pixel width for a given column.
-    /// `full_scan`: if true, inspects dictionary or large sample for batch auto-fit.
+    /// Estimate optimal column pixel width from actual cell data values.
+    /// Clamped strictly to [6, 30] ASCII character units (roughly 64px .. 246px) per user spec:
+    /// very short values (e.g. "65") keep a clean ~6-char floor, while very long text is capped at ~30 chars.
     pub fn estimate_column_width_px(
         &self,
         col: usize,
-        min_px: f32,
-        max_px: f32,
+        min_chars: usize,
+        max_chars: usize,
         full_scan: bool,
     ) -> f32 {
         let meta = &self.variables[col];
-        let header_units = display_char_units(&meta.name).max(
-            display_char_units(&meta.label).min(if full_scan { 28 } else { 18 }),
-        );
-        let sample_limit = if full_scan { 4096 } else { 256 };
+        let sample_limit = if full_scan { 20_000 } else { 512 };
 
         let data_units = match &self.columns[col] {
             ColumnData::String(sc) => sc.estimate_max_display_chars(sample_limit),
             ColumnData::Numeric(nc) => {
                 let n = nc.len();
                 if n == 0 {
-                    4
+                    0
+                } else if n <= sample_limit {
+                    let mut max_u = 0usize;
+                    for i in 0..n {
+                        let s = nc.format_cell(i, meta);
+                        max_u = max_u.max(display_char_units(&s));
+                    }
+                    max_u
                 } else {
                     let step = (n / sample_limit).max(1);
                     let mut max_u = 0usize;
@@ -396,14 +401,14 @@ impl ColumnarTable {
                         max_u = max_u.max(display_char_units(&s));
                         i += step;
                     }
+                    max_u = max_u.max(display_char_units(&nc.format_cell(n - 1, meta)));
                     max_u
                 }
             }
         };
 
-        let units = header_units.max(data_units);
-        // ~7.6 px per ASCII unit + padding for sort badge & cell margins
-        let px = (units as f32) * 7.8 + 30.0;
-        px.clamp(min_px, max_px)
+        let clamped_units = data_units.clamp(min_chars, max_chars);
+        // ~7.6 px per ASCII char unit + 18 px horizontal cell padding
+        (clamped_units as f32) * 7.6 + 18.0
     }
 }

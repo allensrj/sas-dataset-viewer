@@ -40,7 +40,9 @@ pub struct NumericStats {
     pub q3: Option<f64>,
     pub max: Option<f64>,
     pub sum: Option<f64>,
-    pub low_card_freqs: Option<Vec<FreqEntry>>,
+    /// Value frequency listing (like StringStats), always populated for easy inspection & `D` filtering.
+    pub frequencies: Vec<FreqEntry>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +212,24 @@ pub fn compute_column_stats(
 
             let valid_count = valid_vals.len();
             if valid_count == 0 {
+                let mut freqs = Vec::new();
+                for (byte_val, &cnt) in missing_counts.iter().enumerate() {
+                    if cnt > 0 && byte_val != MISSING_VALID as usize {
+                        freqs.push(FreqEntry {
+                            value: format_missing_tag(byte_val as u8),
+                            is_missing: true,
+                            raw_numeric: None,
+                            missing_tag: byte_val as u8,
+                            count: cnt,
+                            percent: if total > 0 {
+                                (cnt as f64) * 100.0 / (total as f64)
+                            } else {
+                                0.0
+                            },
+                        });
+                    }
+                }
+                freqs.sort_unstable_by(|a, b| b.count.cmp(&a.count));
                 return Some(ColumnStats::Numeric(NumericStats {
                     total_rows: total,
                     valid_count: 0,
@@ -224,7 +244,8 @@ pub fn compute_column_stats(
                     q3: None,
                     max: None,
                     sum: None,
-                    low_card_freqs: None,
+                    frequencies: freqs,
+                    truncated: false,
                 }));
             }
 
@@ -264,62 +285,66 @@ pub fn compute_column_stats(
             let median = quantile_sorted(&valid_vals, 0.50);
             let q3 = quantile_sorted(&valid_vals, 0.75);
 
-            // Count distinct values in O(n) single pass over sorted array
+            // Always collect unique numeric value frequencies in a single O(n) scan over sorted values!
+            let mut raw_freqs: Vec<(Option<f64>, u8, usize)> = Vec::new();
             let mut distinct_count = 1usize;
-            let mut prev = valid_vals[0];
+            let mut cur_val = valid_vals[0];
+            let mut cur_cnt = 1usize;
             for &v in &valid_vals[1..] {
-                if v != prev {
+                if v == cur_val {
+                    cur_cnt += 1;
+                } else {
+                    raw_freqs.push((Some(cur_val), MISSING_VALID, cur_cnt));
                     distinct_count += 1;
-                    prev = v;
+                    cur_val = v;
+                    cur_cnt = 1;
+                }
+            }
+            raw_freqs.push((Some(cur_val), MISSING_VALID, cur_cnt));
+
+            for (byte_val, &cnt) in missing_counts.iter().enumerate() {
+                if cnt > 0 && byte_val != MISSING_VALID as usize {
+                    raw_freqs.push((None, byte_val as u8, cnt));
                 }
             }
 
-            // If low-cardinality numeric (e.g. flag 0/1, visits, grades), build helpful frequency breakdown
-            let low_card_freqs = if distinct_count <= 25 {
-                let mut freqs = Vec::with_capacity(distinct_count + tagged_missing_counts.len());
-                let mut cur_val = valid_vals[0];
-                let mut cur_cnt = 1usize;
-                for &v in &valid_vals[1..] {
-                    if v == cur_val {
-                        cur_cnt += 1;
-                    } else {
-                        freqs.push(FreqEntry {
-                            value: format_numeric_value(cur_val, meta),
-                            is_missing: false,
-                            raw_numeric: Some(cur_val),
-                            missing_tag: 0,
-                            count: cur_cnt,
-                            percent: (cur_cnt as f64) * 100.0 / (total as f64),
-                        });
-                        cur_val = v;
-                        cur_cnt = 1;
+            // Sort by count desc, then value asc; truncate before string formatting to stay sub-ms
+            raw_freqs.sort_unstable_by(|a, b| {
+                b.2.cmp(&a.2).then_with(|| match (a.0, b.0) {
+                    (Some(va), Some(vb)) => va.total_cmp(&vb),
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (None, None) => a.1.cmp(&b.1),
+                })
+            });
+
+            let truncated = raw_freqs.len() > MAX_FREQ_ROWS_DISPLAY;
+            if truncated {
+                raw_freqs.truncate(MAX_FREQ_ROWS_DISPLAY);
+            }
+
+            let frequencies: Vec<FreqEntry> = raw_freqs
+                .into_iter()
+                .map(|(val_opt, mtag, cnt)| {
+                    let is_miss = val_opt.is_none();
+                    let formatted = match val_opt {
+                        Some(v) => format_numeric_value(v, meta),
+                        None => format_missing_tag(mtag),
+                    };
+                    FreqEntry {
+                        value: formatted,
+                        is_missing: is_miss,
+                        raw_numeric: val_opt,
+                        missing_tag: mtag,
+                        count: cnt,
+                        percent: if total > 0 {
+                            (cnt as f64) * 100.0 / (total as f64)
+                        } else {
+                            0.0
+                        },
                     }
-                }
-                freqs.push(FreqEntry {
-                    value: format_numeric_value(cur_val, meta),
-                    is_missing: false,
-                    raw_numeric: Some(cur_val),
-                    missing_tag: 0,
-                    count: cur_cnt,
-                    percent: (cur_cnt as f64) * 100.0 / (total as f64),
-                });
-                for (byte_val, &cnt) in missing_counts.iter().enumerate() {
-                    if cnt > 0 && byte_val != MISSING_VALID as usize {
-                        freqs.push(FreqEntry {
-                            value: format_missing_tag(byte_val as u8),
-                            is_missing: true,
-                            raw_numeric: None,
-                            missing_tag: byte_val as u8,
-                            count: cnt,
-                            percent: (cnt as f64) * 100.0 / (total as f64),
-                        });
-                    }
-                }
-                freqs.sort_unstable_by(|a, b| b.count.cmp(&a.count));
-                Some(freqs)
-            } else {
-                None
-            };
+                })
+                .collect();
 
             Some(ColumnStats::Numeric(NumericStats {
                 total_rows: total,
@@ -335,7 +360,8 @@ pub fn compute_column_stats(
                 q3: Some(q3),
                 max: Some(max),
                 sum: Some(sum),
-                low_card_freqs,
+                frequencies,
+                truncated,
             }))
         }
     }

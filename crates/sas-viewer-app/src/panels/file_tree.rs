@@ -182,7 +182,7 @@ impl FileTreeState {
                         ui.label(RichText::new("尚未添加数据集目录").color(pal.text_muted));
                         ui.add_space(6.0);
                         ui.label(
-                            RichText::new("点击上方「+目录」或直接拖入\n文件夹 / .sas7bdat / .xpt 文件")
+                            RichText::new("直接拖入任意 .sas7bdat / .xpt 文件或文件夹\n将自动纳入该目录下全部数据集")
                                 .size(11.5)
                                 .color(pal.text_muted),
                         );

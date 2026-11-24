@@ -1,5 +1,27 @@
+use directories::{ProjectDirs, UserDirs};
 use sas_engine::{SasFormatKind, SasWriter, WriterCell, WriterColumnSpec};
 use std::path::{Path, PathBuf};
+
+/// Pick a guaranteed-writable directory for generated sample datasets.
+/// Avoids `current_dir()` which is read-only `/` when launched from a macOS `.app` bundle
+/// or `C:\Program Files` on Windows.
+pub fn resolve_sample_dir() -> PathBuf {
+    if let Some(proj) = ProjectDirs::from("com", "sasviewer", "SasDatasetViewer") {
+        let dir = proj.data_local_dir().join("sample_datasets");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            return dir;
+        }
+    }
+    if let Some(user_dirs) = UserDirs::new() {
+        if let Some(docs) = user_dirs.document_dir() {
+            let dir = docs.join("SAS-Dataset-Viewer-Samples");
+            if std::fs::create_dir_all(&dir).is_ok() {
+                return dir;
+            }
+        }
+    }
+    std::env::temp_dir().join("sas_viewer_sample_datasets")
+}
 
 /// Generate realistic clinical trial `.sas7bdat` and `.xpt` sample datasets into `dir`
 /// (including a 200,000-row lab dataset for immediate large-file responsiveness testing).
@@ -400,4 +422,25 @@ fn write_lb_large(path: &Path, rows: usize) -> Result<(), String> {
         ])?;
     }
     w.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sas_engine::{load_dataset_sync, EncodingChoice};
+
+    #[test]
+    fn test_generate_and_reload_sample_datasets() {
+        let dir = std::env::temp_dir().join("sas_viewer_sample_gen_unit_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let files = generate_sample_datasets(&dir).expect("generate samples");
+        assert_eq!(files.len(), 3);
+        let dm = load_dataset_sync(&files[0], EncodingChoice::Utf8).expect("load dm");
+        assert_eq!(dm.row_count, 1_200);
+        let ae = load_dataset_sync(&files[1], EncodingChoice::Utf8).expect("load ae");
+        assert_eq!(ae.row_count, 5_000);
+        let lb = load_dataset_sync(&files[2], EncodingChoice::Utf8).expect("load lb");
+        assert_eq!(lb.row_count, 200_000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

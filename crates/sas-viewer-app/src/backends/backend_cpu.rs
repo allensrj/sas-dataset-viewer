@@ -1,26 +1,22 @@
-//! Pure-CPU `egui` software renderer over `softbuffer` (Win32 GDI `BitBlt` on Windows,
-//! CoreGraphics on macOS, X11/Wayland shm on Linux).
+//! Pure-CPU `egui` software rasterizer over `softbuffer` (Win32 GDI `BitBlt` on Windows,
+//! CoreGraphics on macOS, X11/Wayland shm on Linux) with multi-core `rayon` band parallelism.
 //!
-//! Zero GPU, zero OpenGL 2.0+, zero DirectX 12 requirements — guarantees the app runs
-//! smoothly on headless AWS EC2 Xeon servers, RDP sessions, and legacy virtual displays.
+//! Zero GPU, zero OpenGL 2.0+, zero DirectX 12 requirements — guarantees instant single-process
+//! startup on AWS EC2 Xeon servers, Windows Server, RDP, and virtual display adapters.
 
-use crate::app::SasViewerApp;
-use egui::{ClippedPrimitive, Color32, ImageData, Mesh, Rect, TextureId, TexturesDelta, ViewportId};
+use crate::backends::RenderBackend;
+use egui::{ClippedPrimitive, Color32, ImageData, Mesh, Rect, TextureId, TexturesDelta};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
+use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::event_loop::ActiveEventLoop;
+use winit::window::Window;
 
 struct SoftTexture {
     width: usize,
     height: usize,
-    /// Premultiplied sRGBA pixels (`Color32`).
     pixels: Vec<Color32>,
 }
 
@@ -39,7 +35,6 @@ impl SoftTexture {
         let tx = fx - x0 as f32;
         let ty = fy - y0 as f32;
 
-        // Fast path for exact pixel-aligned 1x glyphs (common on 100% DPI Windows RDP)
         if tx < 1e-3 && ty < 1e-3 {
             return self.pixels[y0 * self.width + x0];
         }
@@ -124,6 +119,7 @@ impl CpuRasterizer {
     }
 
     /// Render all egui clipped primitives into an `0x00RRGGBB` framebuffer (`softbuffer` format).
+    /// Uses lock-free horizontal band parallelism on large frames (>250k px) to leverage Xeon multi-core CPUs.
     pub fn paint(
         &self,
         fb: &mut [u32],
@@ -133,20 +129,61 @@ impl CpuRasterizer {
         clear_rgb: u32,
         primitives: &[ClippedPrimitive],
     ) {
-        fb.fill(clear_rgb);
+        if fb_w == 0 || fb_h == 0 {
+            return;
+        }
 
-        for prim in primitives {
-            if let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive {
-                self.paint_mesh(fb, fb_w, fb_h, pixels_per_point, prim.clip_rect, mesh);
+        if fb_w * fb_h >= 250_000 && fb_h >= 128 {
+            // Split framebuffer into horizontal bands across CPU cores
+            let band_rows = (fb_h / 8).max(64);
+            let band_pixels = band_rows * fb_w;
+            fb.par_chunks_mut(band_pixels)
+                .enumerate()
+                .for_each(|(band_idx, band_slice)| {
+                    band_slice.fill(clear_rgb);
+                    let y_offset = (band_idx * band_rows) as i32;
+                    let actual_rows = (band_slice.len() / fb_w) as i32;
+                    let band_y1 = y_offset + actual_rows;
+
+                    for prim in primitives {
+                        if let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive {
+                            self.paint_mesh_band(
+                                band_slice,
+                                fb_w,
+                                y_offset,
+                                band_y1,
+                                pixels_per_point,
+                                prim.clip_rect,
+                                mesh,
+                            );
+                        }
+                    }
+                });
+        } else {
+            fb.fill(clear_rgb);
+            for prim in primitives {
+                if let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive {
+                    self.paint_mesh_band(
+                        fb,
+                        fb_w,
+                        0,
+                        fb_h as i32,
+                        pixels_per_point,
+                        prim.clip_rect,
+                        mesh,
+                    );
+                }
             }
         }
     }
 
-    fn paint_mesh(
+    #[allow(clippy::too_many_arguments)]
+    fn paint_mesh_band(
         &self,
-        fb: &mut [u32],
+        band_fb: &mut [u32],
         fb_w: usize,
-        fb_h: usize,
+        band_y0: i32,
+        band_y1: i32,
         ppp: f32,
         clip_rect: Rect,
         mesh: &Mesh,
@@ -156,9 +193,9 @@ impl CpuRasterizer {
         }
 
         let clip_x0 = (clip_rect.min.x * ppp).floor().max(0.0) as i32;
-        let clip_y0 = (clip_rect.min.y * ppp).floor().max(0.0) as i32;
+        let clip_y0 = ((clip_rect.min.y * ppp).floor() as i32).max(band_y0);
         let clip_x1 = (clip_rect.max.x * ppp).ceil().min(fb_w as f32) as i32;
-        let clip_y1 = (clip_rect.max.y * ppp).ceil().min(fb_h as f32) as i32;
+        let clip_y1 = ((clip_rect.max.y * ppp).ceil() as i32).min(band_y1);
         if clip_x0 >= clip_x1 || clip_y0 >= clip_y1 {
             return;
         }
@@ -170,13 +207,17 @@ impl CpuRasterizer {
         let mut i = 0;
 
         while i + 2 < n_idx {
-            // Fast path: detect axis-aligned quad (2 triangles = 6 indices, 4 corners, uniform color)
             if i + 5 < n_idx {
                 if let Some(quad) = detect_axis_aligned_quad(verts, &idx[i..i + 6], ppp) {
+                    if quad.y1 <= clip_y0 || quad.y0 >= clip_y1 {
+                        i += 6;
+                        continue;
+                    }
                     if quad.is_untextured {
                         fill_solid_rect(
-                            fb,
+                            band_fb,
                             fb_w,
+                            band_y0,
                             quad.x0.max(clip_x0),
                             quad.y0.max(clip_y0),
                             quad.x1.min(clip_x1),
@@ -187,14 +228,7 @@ impl CpuRasterizer {
                         continue;
                     } else if let Some(t) = tex {
                         fill_textured_rect(
-                            fb,
-                            fb_w,
-                            &quad,
-                            clip_x0,
-                            clip_y0,
-                            clip_x1,
-                            clip_y1,
-                            t,
+                            band_fb, fb_w, band_y0, &quad, clip_x0, clip_y0, clip_x1, clip_y1, t,
                         );
                         i += 6;
                         continue;
@@ -206,7 +240,7 @@ impl CpuRasterizer {
             let v1 = verts[idx[i + 1] as usize];
             let v2 = verts[idx[i + 2] as usize];
             rasterize_triangle(
-                fb, fb_w, ppp, clip_x0, clip_y0, clip_x1, clip_y1, &v0, &v1, &v2, tex,
+                band_fb, fb_w, band_y0, ppp, clip_x0, clip_y0, clip_x1, clip_y1, &v0, &v1, &v2, tex,
             );
             i += 3;
         }
@@ -269,7 +303,6 @@ fn detect_axis_aligned_quad(
         max_v = max_v.max(v.uv.y);
     }
 
-    // Verify all 6 vertices lie exactly on the 4 corners of the bounding box
     const EPS: f32 = 1e-3;
     let mut corner_mask = 0u8;
     for v in &pts {
@@ -292,7 +325,6 @@ fn detect_axis_aligned_quad(
         return None;
     }
 
-    // Verify UV orientation matches top-left -> bottom-right if textured
     let is_untextured = max_u <= 1e-4 && max_v <= 1e-4;
     if !is_untextured {
         for v in &pts {
@@ -352,26 +384,34 @@ fn blend_premul(dst: u32, sr: u32, sg: u32, sb: u32, sa: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+#[allow(clippy::too_many_arguments)]
 #[inline]
-fn fill_solid_rect(fb: &mut [u32], fb_w: usize, x0: i32, y0: i32, x1: i32, y1: i32, c: Color32) {
+fn fill_solid_rect(
+    band_fb: &mut [u32],
+    fb_w: usize,
+    band_y0: i32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    c: Color32,
+) {
     if x0 >= x1 || y0 >= y1 || c.a() == 0 {
         return;
     }
     let x0 = x0 as usize;
     let x1 = x1 as usize;
-    let y0 = y0 as usize;
-    let y1 = y1 as usize;
     let (sr, sg, sb, sa) = (c.r() as u32, c.g() as u32, c.b() as u32, c.a() as u32);
     if sa == 255 {
         let packed = (sr << 16) | (sg << 8) | sb;
         for y in y0..y1 {
-            let row = y * fb_w;
-            fb[row + x0..row + x1].fill(packed);
+            let row = ((y - band_y0) as usize) * fb_w;
+            band_fb[row + x0..row + x1].fill(packed);
         }
     } else {
         for y in y0..y1 {
-            let row = y * fb_w;
-            for px in &mut fb[row + x0..row + x1] {
+            let row = ((y - band_y0) as usize) * fb_w;
+            for px in &mut band_fb[row + x0..row + x1] {
                 *px = blend_premul(*px, sr, sg, sb, sa);
             }
         }
@@ -380,8 +420,9 @@ fn fill_solid_rect(fb: &mut [u32], fb_w: usize, x0: i32, y0: i32, x1: i32, y1: i
 
 #[allow(clippy::too_many_arguments)]
 fn fill_textured_rect(
-    fb: &mut [u32],
+    band_fb: &mut [u32],
     fb_w: usize,
+    band_y0: i32,
     quad: &AxisQuad,
     clip_x0: i32,
     clip_y0: i32,
@@ -408,7 +449,7 @@ fn fill_textured_rect(
     for y in y0..y1 {
         let ty_norm = ((y as f32 + 0.5) - quad.fy0) * quad.inv_h;
         let v = quad.v0 + ty_norm * dv;
-        let row = (y as usize) * fb_w;
+        let row = ((y - band_y0) as usize) * fb_w;
         for x in x0..x1 {
             let tx_norm = ((x as f32 + 0.5) - quad.fx0) * quad.inv_w;
             let u = quad.u0 + tx_norm * du;
@@ -422,15 +463,16 @@ fn fill_textured_rect(
             let sb = (vb * tc.b() as u32 + 127) / 255;
             let sa = (va * ta + 127) / 255;
             let idx = row + x as usize;
-            fb[idx] = blend_premul(fb[idx], sr, sg, sb, sa);
+            band_fb[idx] = blend_premul(band_fb[idx], sr, sg, sb, sa);
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn rasterize_triangle(
-    fb: &mut [u32],
+    band_fb: &mut [u32],
     fb_w: usize,
+    band_y0: i32,
     ppp: f32,
     clip_x0: i32,
     clip_y0: i32,
@@ -474,7 +516,7 @@ fn rasterize_triangle(
 
     for py in min_y..=max_y {
         let fy = py as f32 + 0.5;
-        let row = (py as usize) * fb_w;
+        let row = ((py - band_y0) as usize) * fb_w;
         for px in min_x..=max_x {
             let fx = px as f32 + 0.5;
             let w0 = ((x1 - fx) * (y2 - fy) - (y1 - fy) * (x2 - fx)) * sign;
@@ -531,223 +573,104 @@ fn rasterize_triangle(
             };
 
             let idx = row + px as usize;
-            fb[idx] = blend_premul(fb[idx], sr, sg, sb, sa);
+            band_fb[idx] = blend_premul(band_fb[idx], sr, sg, sb, sa);
         }
     }
 }
 
-struct SoftAppRunner {
-    initial_paths: Vec<PathBuf>,
-    window: Option<Arc<Window>>,
-    _context: Option<softbuffer::Context<Arc<Window>>>,
-    surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
-    egui_ctx: egui::Context,
-    egui_state: Option<egui_winit::State>,
+pub struct CpuBackend {
+    window: Arc<Window>,
+    _context: softbuffer::Context<Arc<Window>>,
+    surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
     rasterizer: CpuRasterizer,
-    app: Option<SasViewerApp>,
-    next_repaint: Option<Instant>,
-    init_error: Option<String>,
+    surface_size: (u32, u32),
 }
 
-impl SoftAppRunner {
-    fn new(initial_paths: Vec<PathBuf>) -> Self {
-        Self {
-            initial_paths,
-            window: None,
-            _context: None,
-            surface: None,
-            egui_ctx: egui::Context::default(),
-            egui_state: None,
-            rasterizer: CpuRasterizer::new(),
-            app: None,
-            next_repaint: None,
-            init_error: None,
-        }
-    }
-
-    fn render_frame(&mut self) {
-        let (Some(window), Some(surface), Some(egui_state), Some(app)) = (
-            self.window.as_ref(),
-            self.surface.as_mut(),
-            self.egui_state.as_mut(),
-            self.app.as_mut(),
-        ) else {
-            return;
+impl CpuBackend {
+    pub fn new(event_loop: &ActiveEventLoop, title_suffix: &str) -> Result<Self, String> {
+        let title = if title_suffix.is_empty() {
+            "SAS 数据集查看器 (XPT / SAS7BDAT)".to_string()
+        } else {
+            format!("SAS 数据集查看器 (XPT / SAS7BDAT) [{title_suffix}]")
         };
 
-        let size = window.inner_size();
+        let attrs = Window::default_attributes()
+            .with_title(title)
+            .with_inner_size(LogicalSize::new(1440.0, 880.0))
+            .with_min_inner_size(LogicalSize::new(920.0, 560.0))
+            .with_visible(false);
+
+        let window = Arc::new(
+            event_loop
+                .create_window(attrs)
+                .map_err(|e| format!("创建软件渲染窗口失败: {e}"))?,
+        );
+
+        let context = softbuffer::Context::new(window.clone())
+            .map_err(|e| format!("初始化 GDI/Softbuffer 上下文失败: {e}"))?;
+        let surface = softbuffer::Surface::new(&context, window.clone())
+            .map_err(|e| format!("初始化 GDI/Softbuffer 表面失败: {e}"))?;
+
+        Ok(Self {
+            window,
+            _context: context,
+            surface,
+            rasterizer: CpuRasterizer::new(),
+            surface_size: (0, 0),
+        })
+    }
+}
+
+impl RenderBackend for CpuBackend {
+    fn window(&self) -> &Arc<Window> {
+        &self.window
+    }
+
+    fn max_texture_side(&self) -> Option<usize> {
+        Some(4096)
+    }
+
+    fn resize(&mut self, size: PhysicalSize<u32>) {
+        if let (Some(nw), Some(nh)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
+            if self.surface.resize(nw, nh).is_ok() {
+                self.surface_size = (size.width, size.height);
+            }
+        }
+    }
+
+    fn paint(
+        &mut self,
+        pixels_per_point: f32,
+        clear_color: Color32,
+        clipped_primitives: &[ClippedPrimitive],
+        textures_delta: &TexturesDelta,
+    ) {
+        self.rasterizer.apply_textures_delta(textures_delta);
+
+        let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return;
         }
-        let (Some(nw), Some(nh)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-        else {
-            return;
-        };
-
-        if surface.resize(nw, nh).is_err() {
-            return;
+        if self.surface_size != (size.width, size.height) {
+            self.resize(size);
         }
 
-        let raw_input = egui_state.take_egui_input(window);
-        let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            app.update_ui(ctx);
-        });
+        let clear_rgb = ((clear_color.r() as u32) << 16)
+            | ((clear_color.g() as u32) << 8)
+            | (clear_color.b() as u32);
 
-        egui_state.handle_platform_output(window, full_output.platform_output);
-        self.rasterizer
-            .apply_textures_delta(&full_output.textures_delta);
-
-        let ppp = full_output.pixels_per_point;
-        let clipped = self.egui_ctx.tessellate(full_output.shapes, ppp);
-
-        let clear = self.egui_ctx.style().visuals.panel_fill;
-        let clear_rgb = ((clear.r() as u32) << 16) | ((clear.g() as u32) << 8) | (clear.b() as u32);
-
-        if let Ok(mut buffer) = surface.buffer_mut() {
+        if let Ok(mut buffer) = self.surface.buffer_mut() {
             self.rasterizer.paint(
                 &mut buffer,
                 size.width as usize,
                 size.height as usize,
-                ppp,
+                pixels_per_point,
                 clear_rgb,
-                &clipped,
+                clipped_primitives,
             );
             let _ = buffer.present();
         }
-
-        // Schedule next repaint if egui requested one (e.g. spinner/loading/toast)
-        if let Some(vp) = full_output.viewport_output.get(&ViewportId::ROOT) {
-            if vp.repaint_delay == Duration::ZERO {
-                self.next_repaint = Some(Instant::now());
-                window.request_redraw();
-            } else if vp.repaint_delay < Duration::from_secs(60) {
-                self.next_repaint = Some(Instant::now() + vp.repaint_delay);
-            } else {
-                self.next_repaint = None;
-            }
-        }
     }
-}
-
-impl ApplicationHandler for SoftAppRunner {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        let attrs = Window::default_attributes()
-            .with_title("SAS 数据集查看器 (XPT / SAS7BDAT) [CPU 兼容模式]")
-            .with_inner_size(LogicalSize::new(1440.0, 880.0))
-            .with_min_inner_size(LogicalSize::new(920.0, 560.0));
-
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                self.init_error = Some(format!("创建软件渲染窗口失败: {e}"));
-                event_loop.exit();
-                return;
-            }
-        };
-
-        let context = match softbuffer::Context::new(window.clone()) {
-            Ok(c) => c,
-            Err(e) => {
-                self.init_error = Some(format!("初始化 GDI/Softbuffer 上下文失败: {e}"));
-                event_loop.exit();
-                return;
-            }
-        };
-
-        let surface = match softbuffer::Surface::new(&context, window.clone()) {
-            Ok(s) => s,
-            Err(e) => {
-                self.init_error = Some(format!("初始化 GDI/Softbuffer 表面失败: {e}"));
-                event_loop.exit();
-                return;
-            }
-        };
-
-        let egui_state = egui_winit::State::new(
-            self.egui_ctx.clone(),
-            ViewportId::ROOT,
-            &window,
-            Some(window.scale_factor() as f32),
-            None,
-            None,
-        );
-
-        let win_for_repaint = window.clone();
-        self.egui_ctx.set_request_repaint_callback(move |_| {
-            win_for_repaint.request_redraw();
-        });
-
-        let app = SasViewerApp::from_ctx(&self.egui_ctx, self.initial_paths.clone());
-
-        window.request_redraw();
-        self.window = Some(window);
-        self._context = Some(context);
-        self.surface = Some(surface);
-        self.egui_state = Some(egui_state);
-        self.app = Some(app);
-    }
-
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
-        if let (Some(window), Some(egui_state)) = (self.window.as_ref(), self.egui_state.as_mut()) {
-            let resp = egui_state.on_window_event(window, &event);
-            // Pure window translation does not invalidate the client buffer; skip redundant
-            // full-frame CPU rasterization on Moved to avoid saturating a CPU core during drag.
-            if resp.repaint && !matches!(event, WindowEvent::Moved(_)) {
-                window.request_redraw();
-            }
-        }
-
-        match event {
-            WindowEvent::CloseRequested => {
-                event_loop.exit();
-            }
-            WindowEvent::RedrawRequested => {
-                self.render_frame();
-            }
-            WindowEvent::Resized(_) => {
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(target) = self.next_repaint {
-            let now = Instant::now();
-            if now >= target {
-                self.next_repaint = None;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            } else {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(target));
-            }
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
-        }
-    }
-}
-
-pub fn run_software_app(initial_paths: Vec<PathBuf>) -> Result<(), String> {
-    let event_loop = EventLoop::new().map_err(|e| format!("无法创建事件循环: {e}"))?;
-    let mut runner = SoftAppRunner::new(initial_paths);
-    event_loop
-        .run_app(&mut runner)
-        .map_err(|e| format!("软件渲染事件循环异常: {e}"))?;
-    if let Some(err) = runner.init_error {
-        return Err(err);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -757,26 +680,29 @@ mod tests {
     use egui::pos2;
 
     #[test]
-    fn test_cpu_rasterizer_solid_quad_and_clipping() {
+    fn test_cpu_rasterizer_solid_quad_and_band_parallelism() {
         let rast = CpuRasterizer::new();
-        let mut fb = vec![0u32; 20 * 20];
-        let mut mesh = Mesh::default();
-        let red = Color32::from_rgb(200, 40, 20);
-        mesh.vertices = vec![
-            Vertex { pos: pos2(2.0, 2.0), uv: pos2(0.0, 0.0), color: red },
-            Vertex { pos: pos2(10.0, 2.0), uv: pos2(0.0, 0.0), color: red },
-            Vertex { pos: pos2(10.0, 10.0), uv: pos2(0.0, 0.0), color: red },
-            Vertex { pos: pos2(2.0, 10.0), uv: pos2(0.0, 0.0), color: red },
-        ];
-        mesh.indices = vec![0, 1, 2, 0, 2, 3];
-        let prim = ClippedPrimitive {
-            clip_rect: Rect::from_min_max(pos2(0.0, 0.0), pos2(6.0, 6.0)),
-            primitive: Primitive::Mesh(mesh),
-        };
-        rast.paint(&mut fb, 20, 20, 1.0, 0x00112233, &[prim]);
-        let expected_red = (200 << 16) | (40 << 8) | 20;
-        assert_eq!(fb[3 * 20 + 3], expected_red);
-        // Outside clip rect remains clear color
-        assert_eq!(fb[8 * 20 + 8], 0x00112233);
+        // Test both small (single-threaded) and large (rayon band-parallel) framebuffers
+        for (w, h) in [(20usize, 20usize), (800usize, 600usize)] {
+            let mut fb = vec![0u32; w * h];
+            let mut mesh = Mesh::default();
+            let red = Color32::from_rgb(200, 40, 20);
+            mesh.vertices = vec![
+                Vertex { pos: pos2(2.0, 2.0), uv: pos2(0.0, 0.0), color: red },
+                Vertex { pos: pos2((w - 2) as f32, 2.0), uv: pos2(0.0, 0.0), color: red },
+                Vertex { pos: pos2((w - 2) as f32, (h - 2) as f32), uv: pos2(0.0, 0.0), color: red },
+                Vertex { pos: pos2(2.0, (h - 2) as f32), uv: pos2(0.0, 0.0), color: red },
+            ];
+            mesh.indices = vec![0, 1, 2, 0, 2, 3];
+            let clip_max = (h / 2) as f32;
+            let prim = ClippedPrimitive {
+                clip_rect: Rect::from_min_max(pos2(0.0, 0.0), pos2(clip_max, clip_max)),
+                primitive: Primitive::Mesh(mesh),
+            };
+            rast.paint(&mut fb, w, h, 1.0, 0x00112233, &[prim]);
+            let expected_red = (200 << 16) | (40 << 8) | 20;
+            assert_eq!(fb[3 * w + 3], expected_red);
+            assert_eq!(fb[(h - 3) * w + (w - 3)], 0x00112233);
+        }
     }
 }

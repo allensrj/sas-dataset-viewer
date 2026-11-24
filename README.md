@@ -24,21 +24,29 @@
 | `Ctrl/Cmd + B` | 收起 / 展开左侧文件管理器 |
 | `Ctrl/Cmd + \` | 收起 / 展开最右侧信息栏 |
 
-## 构建与打包
+## 构建与发布版本（三端独立产物）
 
-### macOS（直接生成双击可运行的 `.app`）
+本应用在 `v0.2.0` 起采用自建统一 `winit` 事件循环宿主（脱离 `eframe`，彻底消除 Windows 拖拽标题栏/边框模态循环冻结，见 #3），共享 100% 同一套底层 C (`ReadStat`) / Rust 数据引擎与三栏 UI 代码，仅在编译期通过 Cargo Feature 产出三个专用发行版：
+
+| 发布产物 | 适用场景 | 渲染架构 | 特点 |
+| :--- | :--- | :--- | :--- |
+| **`SAS-Dataset-Viewer-macOS-arm64.zip`** | macOS (Apple Silicon) | 原生 **Apple Metal** (`backend-wgpu`) | 剔除 OpenGL/软渲染冗余，解压即得 `.app` |
+| **`SAS-Dataset-Viewer-win-x64.exe`** | 本地 Windows 10/11 电脑 | 桌面 GPU（`glow` / `wgpu`）+ CPU 兜底 | 跳过纯平移无效重绘与缩放事件合并，流畅高刷，静态 CRT |
+| **`SAS-Dataset-Viewer-win-aws.exe`** | AWS EC2 / Windows Server / RDP | **纯多核 CPU Win32 GDI** (`backend-cpu`) | 零 GPU/DX12/OpenGL/VC++ 依赖，单进程直启秒开，极致精简 |
+
+### 本地构建命令
+
 ```bash
+# 1. macOS Apple Silicon (.app)
 bash scripts/bundle_macos.sh
-# 产物位置: dist/SAS Dataset Viewer.app
-```
 
-### Windows（独立单文件 `.exe`，零外部 DLL 依赖）
-在 Windows 上安装 Rust 工具链后执行：
-```powershell
-cargo build --release --bin sas-viewer
-# 产物位置: target\release\sas-viewer.exe
+# 2. Windows 桌面端 (win-x64)
+cargo build --release --bin sas-viewer --no-default-features --features "backend-glow,backend-wgpu,backend-cpu"
+
+# 3. Windows AWS 无显卡服务器专用版 (win-aws)
+cargo build --release --bin sas-viewer --no-default-features --features backend-cpu
 ```
-或直接通过仓库内置的 `.github/workflows/release.yml` 在 GitHub Actions 上自动产出 Windows `.exe` 与 macOS `.app`。
+也可以通过仓库内置的 `.github/workflows/release.yml` 在 GitHub Actions 上自动同时构建并发布全部三个版本。
 
 ## 贡献者（Contributors）
 感谢以下开发者为本项目做出的贡献：

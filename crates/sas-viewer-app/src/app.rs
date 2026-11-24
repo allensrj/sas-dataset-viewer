@@ -24,10 +24,6 @@ pub struct SasViewerApp {
 }
 
 impl SasViewerApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, initial_paths: Vec<PathBuf>) -> Self {
-        Self::from_ctx(&cc.egui_ctx, initial_paths)
-    }
-
     pub fn from_ctx(egui_ctx: &egui::Context, initial_paths: Vec<PathBuf>) -> Self {
         setup_cjk_fonts(egui_ctx);
         let mut config = AppConfig::load();
@@ -443,12 +439,6 @@ impl<'a> TabViewer for DatasetDockViewer<'a> {
     fn on_close(&mut self, tab: &mut Self::Tab) -> bool {
         self.closed_tabs.push(*tab);
         true
-    }
-}
-
-impl eframe::App for SasViewerApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.update_ui(ctx);
     }
 }
 

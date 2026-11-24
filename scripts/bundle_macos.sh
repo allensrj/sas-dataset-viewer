@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "Building release binary..."
-cargo build --release --bin sas-viewer
+echo "Building macOS Apple Metal release binary (backend-wgpu only)..."
+cargo build --release --bin sas-viewer --no-default-features --features backend-wgpu
 
 APP_NAME="SAS Dataset Viewer"
 BUNDLE_DIR="$ROOT_DIR/dist/${APP_NAME}.app"
@@ -39,9 +39,9 @@ cat > "$CONTENTS_DIR/Info.plist" << 'EOF'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.3</string>
+    <string>0.2.0</string>
     <key>CFBundleVersion</key>
-    <string>4</string>
+    <string>5</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>CFBundleDocumentTypes</key>

@@ -39,6 +39,14 @@
 ```bash
 # 1. macOS Apple Silicon (.app)
 bash scripts/bundle_macos.sh
+```
+> **macOS 首次打开提示说明**：由于未购买 Apple Developer 年度付费签名公证，浏览器从 GitHub 下载的压缩包会被系统打上隔离标记（`com.apple.quarantine`）。若首次双击提示“无法验证开发者”或“已损坏”，在终端执行以下命令清除下载隔离属性即可永久正常双击打开：
+> ```bash
+> xattr -cr "/path/to/SAS Dataset Viewer.app"
+> ```
+> （若已拖入“应用程序”目录，执行 `xattr -cr "/Applications/SAS Dataset Viewer.app"`。）
+
+```bash
 
 # 2. Windows 桌面端 (win-x64)
 cargo build --release --bin sas-viewer --no-default-features --features "backend-glow,backend-wgpu,backend-cpu"

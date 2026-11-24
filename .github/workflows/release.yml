@@ -79,7 +79,7 @@ jobs:
       - name: Zip macOS .app bundle
         run: |
           cd dist
-          zip -r SAS-Dataset-Viewer-macOS-arm64.zip "SAS Dataset Viewer.app"
+          ditto -c -k --keepParent "SAS Dataset Viewer.app" SAS-Dataset-Viewer-macOS-arm64.zip
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4

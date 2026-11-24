@@ -62,4 +62,8 @@ cat > "$CONTENTS_DIR/Info.plist" << 'EOF'
 </plist>
 EOF
 
-echo "Created macOS application bundle at: $BUNDLE_DIR"
+# Ad-hoc sign the full .app bundle so Info.plist and resources are properly sealed on Apple Silicon
+codesign --force --deep --sign - --identifier "com.sasviewer.app" "$BUNDLE_DIR"
+codesign --verify --deep --strict "$BUNDLE_DIR"
+
+echo "Created and ad-hoc signed macOS application bundle at: $BUNDLE_DIR"

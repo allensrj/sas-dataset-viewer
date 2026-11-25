@@ -98,18 +98,33 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Publish GitHub Release
+      - name: Publish or Update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG_NAME" release-assets/* \
-            --repo "${{ github.repository }}" \
-            --title "SAS Dataset Viewer $TAG_NAME" \
-            --notes "Cross-platform high-performance SAS Dataset Viewer (.sas7bdat & .xpt) built with C (ReadStat) + Rust + unified \`winit\` window host (bypassing \`eframe\` to resolve #3).
+          NOTES=$(cat <<'EOF'
+          Cross-platform high-performance SAS Dataset Viewer (`.sas7bdat` & `.xpt`) built with pure C (`ReadStat`) + Rust columnar engine + unified `winit` window host.
 
           ### Downloads (Three Dedicated Builds)
-          - **macOS (Apple Silicon)**: \`SAS-Dataset-Viewer-macOS-arm64.zip\` — Native Apple Metal (\`backend-wgpu\`), extract to get \`SAS Dataset Viewer.app\`
-          - **Windows Desktop (x64)**: \`SAS-Dataset-Viewer-win-x64.exe\` — Desktop GPU (\`glow\` / \`wgpu\`) with pure-CPU GDI fallback, zero \`Moved\` repaints & coalesced \`Resized\` (#3), static CRT
-          - **Windows AWS / Server / RDP (x64)**: \`SAS-Dataset-Viewer-win-aws.exe\` — Pure multi-core CPU Win32 GDI (\`backend-cpu\` only), instant single-process startup, zero GPU/DX12/OpenGL/VC++ dependencies" \
-            --latest
+          - **macOS (Apple Silicon)**: `SAS-Dataset-Viewer-macOS-arm64.zip` — Native Apple Metal (`backend-wgpu`), extract to get `SAS Dataset Viewer.app`
+          - **Windows Desktop (x64)**: `SAS-Dataset-Viewer-win-x64.exe` — Desktop GPU (`glow` / `wgpu`) with pure-CPU GDI fallback, static CRT
+          - **Windows AWS / Server / RDP (x64)**: `SAS-Dataset-Viewer-win-aws.exe` — Pure multi-core CPU Win32 GDI (`backend-cpu`), instant single-process startup, zero GPU/DX12/OpenGL/VC++ dependencies
+          EOF
+          )
+          if gh release view "$TAG_NAME" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" release-assets/* \
+              --repo "${{ github.repository }}" \
+              --clobber
+            gh release edit "$TAG_NAME" \
+              --repo "${{ github.repository }}" \
+              --title "SAS Dataset Viewer $TAG_NAME" \
+              --notes "$NOTES" \
+              --latest
+          else
+            gh release create "$TAG_NAME" release-assets/* \
+              --repo "${{ github.repository }}" \
+              --title "SAS Dataset Viewer $TAG_NAME" \
+              --notes "$NOTES" \
+              --latest
+          fi

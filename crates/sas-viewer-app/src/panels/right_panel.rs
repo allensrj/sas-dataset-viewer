@@ -2,15 +2,24 @@ use crate::state::{DatasetTabState, FocusRegion, RightTab, StatsFreqSortField};
 use crate::theme::AppPalette;
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2};
 use sas_engine::{format_numeric_value, format_plain_number, ColumnStats, VarType};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone)]
+pub enum RightPanelAction {
+    OpenVarPresetDialog { tab_id: u64, path: PathBuf },
+    ApplyVarPreset { tab_id: u64, path: PathBuf },
+}
 
 /// Render the Right Sidebar containing 3 tabs: Variables / Statistics / Shortcuts.
 pub fn show_right_panel(
     ui: &mut Ui,
     active_tab: Option<&mut DatasetTabState>,
+    saved_var_preset: Option<&[String]>,
     current_right_tab: &mut RightTab,
     focus_var_search: &mut bool,
     pal: &AppPalette,
-) {
+) -> Vec<RightPanelAction> {
+    let mut actions = Vec::new();
     let panel_w = ui.available_width().max(120.0);
     ui.set_max_width(panel_w);
 
@@ -36,7 +45,15 @@ pub fn show_right_panel(
     match *current_right_tab {
         RightTab::Variables => {
             if let Some(tab) = active_tab {
-                show_variables_tab(ui, tab, current_right_tab, focus_var_search, pal);
+                show_variables_tab(
+                    ui,
+                    tab,
+                    saved_var_preset,
+                    current_right_tab,
+                    focus_var_search,
+                    pal,
+                    &mut actions,
+                );
             } else {
                 show_no_dataset_placeholder(ui, pal);
             }
@@ -52,6 +69,8 @@ pub fn show_right_panel(
             show_shortcuts_tab(ui, pal);
         }
     }
+
+    actions
 }
 
 fn show_no_dataset_placeholder(ui: &mut Ui, pal: &AppPalette) {
@@ -70,9 +89,11 @@ fn show_no_dataset_placeholder(ui: &mut Ui, pal: &AppPalette) {
 fn show_variables_tab(
     ui: &mut Ui,
     tab: &mut DatasetTabState,
+    saved_var_preset: Option<&[String]>,
     current_right_tab: &mut RightTab,
     focus_var_search: &mut bool,
     pal: &AppPalette,
+    actions: &mut Vec<RightPanelAction>,
 ) {
     let Some(table) = tab.table.clone() else {
         ui.label(RichText::new("数据集加载中...").color(pal.text_muted));
@@ -127,6 +148,7 @@ fn show_variables_tab(
     let total_vars = table.variables.len();
 
     // Stable toolbar: keep exact same buttons always laid out (never add/remove buttons while typing!)
+    let has_preset = saved_var_preset.is_some_and(|v| !v.is_empty());
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         if ui.small_button("全选(U)").on_hover_text("显示全部变量").clicked() {
@@ -135,6 +157,47 @@ fn show_variables_tab(
         if ui.small_button("清空(H)").on_hover_text("隐藏全部变量").clicked() {
             tab.hide_all_variables();
         }
+
+        let preset_btn = if has_preset {
+            egui::Button::new(RichText::new("预设勾选变量").color(pal.accent))
+                .small()
+                .fill(pal.accent_soft)
+                .stroke(Stroke::new(1.0, pal.accent))
+        } else {
+            egui::Button::new("预设勾选变量").small()
+        };
+        let preset_hover = if let Some(vars) = saved_var_preset {
+            format!(
+                "编辑此数据集的预设勾选变量（已保存 {} 个）：\n{}\n预设将跟随该数据集持久化保存，直到在文件管理器中移除",
+                vars.len(),
+                vars.join(", ")
+            )
+        } else {
+            "为此数据集设置预设勾选的变量（如 STUDYID, USUBJID, SUBJID, SITEID）\n保存后将跟随该数据集，直到在文件管理器中移除".to_string()
+        };
+        if ui.add(preset_btn).on_hover_text(preset_hover).clicked() {
+            actions.push(RightPanelAction::OpenVarPresetDialog {
+                tab_id: tab.id,
+                path: tab.path.clone(),
+            });
+        }
+
+        let apply_hover = if let Some(vars) = saved_var_preset {
+            format!("立即按预设勾选以下 {} 个变量：\n{}", vars.len(), vars.join(", "))
+        } else {
+            String::new()
+        };
+        let apply_resp = ui
+            .add_enabled(has_preset, egui::Button::new("应用预设").small())
+            .on_hover_text(apply_hover)
+            .on_disabled_hover_text("当前数据集尚未设置预设勾选变量，请先点击「预设勾选变量」进行设置");
+        if apply_resp.clicked() {
+            actions.push(RightPanelAction::ApplyVarPreset {
+                tab_id: tab.id,
+                path: tab.path.clone(),
+            });
+        }
+
         if ui
             .add_enabled(!search_lower.is_empty(), egui::Button::new("选匹配").small())
             .on_hover_text("勾选当前搜索匹配到的变量")

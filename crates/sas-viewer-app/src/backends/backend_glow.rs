@@ -22,8 +22,10 @@ pub struct GlowBackend {
 
 impl GlowBackend {
     pub fn new(event_loop: &ActiveEventLoop) -> Result<Self, String> {
+        let window_icon = crate::assets::load_window_icon();
         let attrs = Window::default_attributes()
             .with_title("SAS 数据集查看器 (XPT / SAS7BDAT)")
+            .with_window_icon(window_icon.clone())
             .with_inner_size(LogicalSize::new(1440.0, 880.0))
             .with_min_inner_size(LogicalSize::new(920.0, 560.0))
             .with_visible(false);
@@ -49,6 +51,7 @@ impl GlowBackend {
             None => {
                 let fallback_attrs = Window::default_attributes()
                     .with_title("SAS 数据集查看器 (XPT / SAS7BDAT)")
+                    .with_window_icon(window_icon)
                     .with_inner_size(LogicalSize::new(1440.0, 880.0))
                     .with_min_inner_size(LogicalSize::new(920.0, 560.0))
                     .with_visible(false);

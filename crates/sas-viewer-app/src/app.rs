@@ -1,15 +1,17 @@
-use crate::config::AppConfig;
+use crate::assets::AppTextures;
+use crate::config::{parse_var_preset_input, AppConfig};
 use crate::panels::data_grid::{show_data_grid, GridAction};
 use crate::panels::file_tree::{format_file_size, FileTreeAction, FileTreeState, OpenSplitMode};
-use crate::panels::right_panel::show_right_panel;
+use crate::panels::right_panel::{show_right_panel, RightPanelAction};
 use crate::sample_gen::{generate_sample_datasets, resolve_sample_dir};
 use crate::state::{DatasetTabState, FocusRegion, RightTab};
 use crate::theme::{apply_theme, setup_cjk_fonts, AppPalette};
-use egui::{Color32, Key, RichText, Ui};
+use crate::updater::{UpdateCheckState, UpdateChecker, APP_VERSION, RELEASES_URL, REPO_URL};
+use egui::{Align2, Color32, FontId, Key, OpenUrl, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle, SurfaceIndex, TabViewer};
 use sas_engine::{ColumnStats, EncodingChoice, SasFormatKind};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Monitor DPI baseline passed from `WindowHost` so the bottom-right display scale
 /// control starts cleanly at `100%` on every monitor while cooperating with `ZoomPrefs`.
@@ -33,6 +35,15 @@ const DISPLAY_SCALE_PRESETS: &[(f32, &str)] = &[
     (2.00, "200%"),
 ];
 
+#[derive(Debug, Clone)]
+struct VarPresetDialogState {
+    tab_id: u64,
+    dataset_path: PathBuf,
+    dataset_name: String,
+    input_text: String,
+    just_opened: bool,
+}
+
 pub struct SasViewerApp {
     config: AppConfig,
     file_tree: FileTreeState,
@@ -44,6 +55,10 @@ pub struct SasViewerApp {
     focus_var_search: bool,
     focus_cell_search: bool,
     status_toast: Option<(String, std::time::Instant)>,
+    textures: AppTextures,
+    about_open: bool,
+    updater: UpdateChecker,
+    var_preset_dialog: Option<VarPresetDialogState>,
 }
 
 impl SasViewerApp {
@@ -63,12 +78,17 @@ impl SasViewerApp {
             focus_var_search: false,
             focus_cell_search: false,
             status_toast: None,
+            textures: AppTextures::default(),
+            about_open: false,
+            updater: UpdateChecker::default(),
+            var_preset_dialog: None,
         };
 
         for p in initial_paths {
             app.ingest_dropped_path(p, Some(egui_ctx.clone()));
         }
         app.file_tree.refresh_all(&app.config);
+        app.updater.start_check(false, Some(egui_ctx.clone()));
         app
     }
 
@@ -297,7 +317,14 @@ impl SasViewerApp {
             }
         }
 
-        if typing_in_text {
+        if typing_in_text || self.about_open || self.var_preset_dialog.is_some() {
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                if self.var_preset_dialog.is_some() {
+                    self.var_preset_dialog = None;
+                } else if self.about_open {
+                    self.about_open = false;
+                }
+            }
             return;
         }
 
@@ -521,20 +548,44 @@ impl SasViewerApp {
                 any_loading = true;
             }
         }
+        self.updater.poll();
         if any_loading {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        } else if self.updater.is_checking() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
         self.handle_os_dropped_files(ctx);
         self.handle_shortcuts(ctx);
 
         let pal = AppPalette::for_mode(self.config.dark_mode);
+        let logo_tex_id = self.textures.app_logo(ctx).map(|t| t.id());
 
-        // Top compact toolbar (streamlined: removed redundant Add Folder / Open File; added dataset Search!)
+        // Top compact toolbar (streamlined: app logo + panel toggles + dataset Search + theme + About circle-i)
         egui::TopBottomPanel::top("top_toolbar")
             .exact_height(34.0)
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
+                    if let Some(tex_id) = logo_tex_id {
+                        let logo_resp = ui
+                            .add(
+                                egui::Image::new(egui::load::SizedTexture::new(
+                                    tex_id,
+                                    Vec2::splat(22.0),
+                                ))
+                                .sense(Sense::click()),
+                            )
+                            .on_hover_text(format!(
+                                "SAS 数据集查看器 v{APP_VERSION}\n点击查看关于与检查更新"
+                            ));
+                        if logo_resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if logo_resp.clicked() {
+                            self.about_open = true;
+                        }
+                    }
+
                     let left_lbl = if self.config.left_panel_open {
                         "◧ 隐藏文件栏"
                     } else {
@@ -704,6 +755,33 @@ impl SasViewerApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let update_info = self.updater.available_update().cloned();
+                        if about_circle_i_button(ui, &pal, update_info.as_ref()) {
+                            self.about_open = !self.about_open;
+                        }
+
+                        if let Some(info) = self.updater.should_show_toolbar_badge().cloned() {
+                            let badge = egui::Button::new(
+                                RichText::new(format!("⬆ 新版本 {}", info.tag_name))
+                                    .size(11.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            )
+                            .small()
+                            .fill(Color32::from_rgb(217, 119, 6))
+                            .stroke(Stroke::NONE);
+                            if ui
+                                .add(badge)
+                                .on_hover_text(format!(
+                                    "检测到新版本 {}（当前 v{}），点击查看并前往 GitHub Release 下载",
+                                    info.tag_name, APP_VERSION
+                                ))
+                                .clicked()
+                            {
+                                self.about_open = true;
+                            }
+                        }
+
                         let right_lbl = if self.config.right_panel_open {
                             "隐藏右侧栏 ◨"
                         } else {
@@ -904,6 +982,15 @@ impl SasViewerApp {
                                     }
                                 }
                             }
+                            FileTreeAction::RemovedFromSidebar { path } => {
+                                if let Some(dlg) = &self.var_preset_dialog {
+                                    if dlg.dataset_path == path
+                                        || dlg.dataset_path.starts_with(&path)
+                                    {
+                                        self.var_preset_dialog = None;
+                                    }
+                                }
+                            }
                         }
                     }
                 });
@@ -919,6 +1006,7 @@ impl SasViewerApp {
         // Right Panel: Variables (4-col) / Statistics (selectable values) / Shortcuts
         // `ui.set_min_width(panel_rect.width())` keeps SidePanel's persisted width locked to the exact
         // user-dragged width (neither shrinking on mouse move nor expanding from inner widgets!).
+        let mut right_actions = Vec::new();
         if self.config.right_panel_open {
             let right_resp = egui::SidePanel::right("right_inspector_panel")
                 .resizable(true)
@@ -933,12 +1021,20 @@ impl SasViewerApp {
                             .layout(egui::Layout::top_down(egui::Align::Min)),
                     );
                     child_ui.set_clip_rect(panel_rect);
+                    let active_path = self
+                        .active_tab_id
+                        .and_then(|id| self.tabs.get(&id))
+                        .map(|t| t.path.clone());
+                    let saved_var_preset = active_path
+                        .as_deref()
+                        .and_then(|p| self.config.get_dataset_var_preset(p));
                     let active_tab = self
                         .active_tab_id
                         .and_then(|id| self.tabs.get_mut(&id));
-                    show_right_panel(
+                    right_actions = show_right_panel(
                         &mut child_ui,
                         active_tab,
+                        saved_var_preset,
                         &mut self.right_tab,
                         &mut self.focus_var_search,
                         &pal,
@@ -950,6 +1046,32 @@ impl SasViewerApp {
             {
                 self.config.right_panel_width = cur_w;
                 self.config.save();
+            }
+        }
+        for act in right_actions {
+            match act {
+                RightPanelAction::OpenVarPresetDialog { tab_id, path } => {
+                    let existing = self
+                        .config
+                        .get_dataset_var_preset(&path)
+                        .map(|vars| vars.join(", "))
+                        .unwrap_or_default();
+                    let dataset_name = self
+                        .tabs
+                        .get(&tab_id)
+                        .map(|t| t.display_name.clone())
+                        .unwrap_or_else(|| self.config.display_name_for(&path));
+                    self.var_preset_dialog = Some(VarPresetDialogState {
+                        tab_id,
+                        dataset_path: path,
+                        dataset_name,
+                        input_text: existing,
+                        just_opened: true,
+                    });
+                }
+                RightPanelAction::ApplyVarPreset { tab_id, path } => {
+                    self.apply_saved_var_preset(tab_id, &path);
+                }
             }
         }
 
@@ -978,12 +1100,26 @@ impl SasViewerApp {
                 if self.tabs.is_empty() {
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
-                            ui.add_space(80.0);
+                            ui.add_space(64.0);
+                            if let Some(tex_id) = logo_tex_id {
+                                ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                                    tex_id,
+                                    Vec2::splat(72.0),
+                                )));
+                                ui.add_space(12.0);
+                            }
                             ui.label(
                                 RichText::new("SAS 数据集高速查看器")
                                     .size(22.0)
                                     .strong()
                                     .color(pal.text_primary),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!("v{APP_VERSION}"))
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(pal.accent),
                             );
                             ui.add_space(8.0);
                             ui.label(
@@ -1058,7 +1194,595 @@ impl SasViewerApp {
                     }
                 }
             });
+
+        self.show_var_preset_dialog(ctx, &pal);
+        self.show_about_window(ctx, &pal);
     }
+
+    fn apply_saved_var_preset(&mut self, tab_id: u64, path: &Path) {
+        let Some(preset) = self.config.get_dataset_var_preset(path).map(|v| v.to_vec()) else {
+            self.toast("当前数据集尚未设置预设勾选变量");
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return;
+        };
+        let (matched, unmatched) = tab.apply_var_preset(&preset);
+        if matched == 0 {
+            self.toast("预设中的变量在当前数据集中均未找到，未更改勾选状态");
+        } else if unmatched.is_empty() {
+            self.toast(format!("已应用预设：勾选 {matched} 个变量"));
+        } else {
+            self.toast(format!(
+                "已应用预设：勾选 {matched} 个变量（未找到 {} 个：{}）",
+                unmatched.len(),
+                unmatched.join(", ")
+            ));
+        }
+    }
+
+    fn show_var_preset_dialog(&mut self, ctx: &egui::Context, pal: &AppPalette) {
+        let Some(mut dlg) = self.var_preset_dialog.take() else {
+            return;
+        };
+
+        let mut keep_open = true;
+        let mut action_cancel = false;
+        let mut action_save = false;
+        let mut action_save_and_apply = false;
+        let mut action_clear_preset = false;
+        let mut action_import_checked = false;
+
+        let has_existing_preset = self
+            .config
+            .get_dataset_var_preset(&dlg.dataset_path)
+            .is_some();
+
+        let parsed = parse_var_preset_input(&dlg.input_text);
+        let (matched_preview, unmatched_preview) = self
+            .tabs
+            .get(&dlg.tab_id)
+            .map(|tab| tab.preview_var_preset(&parsed))
+            .unwrap_or_else(|| (Vec::new(), Vec::new()));
+
+        egui::Window::new(format!("预设勾选变量 - {}", dlg.dataset_name))
+            .id(egui::Id::new("var_preset_dialog_window"))
+            .open(&mut keep_open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(440.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("输入要预设勾选的变量名（逗号、分号、空格或换行分隔，不区分大小写）：")
+                        .size(12.0)
+                        .color(pal.text_primary),
+                );
+                ui.label(
+                    RichText::new("示例：STUDYID, USUBJID, SUBJID, SITEID")
+                        .size(11.2)
+                        .color(pal.text_muted),
+                );
+                ui.add_space(6.0);
+
+                let text_resp = ui.add(
+                    egui::TextEdit::multiline(&mut dlg.input_text)
+                        .desired_rows(4)
+                        .desired_width(f32::INFINITY)
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("STUDYID, USUBJID, SUBJID, SITEID"),
+                );
+                if dlg.just_opened {
+                    text_resp.request_focus();
+                    dlg.just_opened = false;
+                }
+
+                ui.add_space(5.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("导入当前已勾选变量")
+                        .on_hover_text("将当前数据集中已勾选的变量名填入上方输入框")
+                        .clicked()
+                    {
+                        action_import_checked = true;
+                    }
+                    if ui
+                        .add_enabled(!dlg.input_text.is_empty(), egui::Button::new("清空输入").small())
+                        .clicked()
+                    {
+                        dlg.input_text.clear();
+                    }
+                });
+
+                ui.add_space(6.0);
+                // Live matching feedback
+                egui::Frame::NONE
+                    .fill(pal.bg_header_name)
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        if parsed.is_empty() {
+                            ui.label(
+                                RichText::new("当前未输入变量名（保存空内容将清除此数据集的预设）")
+                                    .size(11.2)
+                                    .color(pal.text_muted),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new(format!(
+                                    "匹配预览：当前数据集可匹配 {} / {} 个变量",
+                                    matched_preview.len(),
+                                    parsed.len()
+                                ))
+                                .size(11.4)
+                                .strong()
+                                .color(if matched_preview.is_empty() {
+                                    Color32::from_rgb(205, 70, 70)
+                                } else {
+                                    pal.accent
+                                }),
+                            );
+                            if !matched_preview.is_empty() {
+                                ui.label(
+                                    RichText::new(format!("已匹配：{}", matched_preview.join(", ")))
+                                        .size(11.0)
+                                        .color(pal.text_primary),
+                                );
+                            }
+                            if !unmatched_preview.is_empty() {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "未在当前数据集找到：{}",
+                                        unmatched_preview.join(", ")
+                                    ))
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(217, 119, 6)),
+                                );
+                            }
+                        }
+                    });
+
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "存储说明：保存后此预设会在后台跟随该数据集持久化记忆，直到在左侧文件管理器中将其「从侧栏移除」。",
+                    )
+                    .size(10.8)
+                    .color(pal.text_muted),
+                );
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    if has_existing_preset
+                        && ui
+                            .button(
+                                RichText::new("清除预设").color(Color32::from_rgb(205, 70, 70)),
+                            )
+                            .on_hover_text("删除此数据集已保存的预设勾选变量")
+                            .clicked()
+                    {
+                        action_clear_preset = true;
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let save_apply_btn = egui::Button::new(
+                            RichText::new("保存并应用").color(Color32::WHITE).strong(),
+                        )
+                        .fill(pal.accent);
+                        if ui
+                            .add_enabled(!parsed.is_empty(), save_apply_btn)
+                            .on_hover_text("保存此预设并立即勾选对应变量")
+                            .clicked()
+                        {
+                            action_save_and_apply = true;
+                        }
+                        if ui
+                            .button("保存预设")
+                            .on_hover_text("保存预设（稍后可点击右侧「应用预设」生效）")
+                            .clicked()
+                        {
+                            action_save = true;
+                        }
+                        if ui.button("取消").clicked() {
+                            action_cancel = true;
+                        }
+                    });
+                });
+            });
+
+        if action_cancel {
+            keep_open = false;
+        }
+
+        if action_import_checked {
+            if let Some(tab) = self.tabs.get(&dlg.tab_id) {
+                let checked = tab.checked_variable_names();
+                dlg.input_text = checked.join(", ");
+            }
+        }
+
+        if action_clear_preset {
+            self.config.clear_dataset_var_preset(&dlg.dataset_path);
+            self.toast(format!("已清除 {} 的预设勾选变量", dlg.dataset_name));
+            return;
+        }
+
+        if action_save || action_save_and_apply {
+            let vars = parse_var_preset_input(&dlg.input_text);
+            let path = dlg.dataset_path.clone();
+            let tab_id = dlg.tab_id;
+            let name = dlg.dataset_name.clone();
+            self.config.set_dataset_var_preset(path.clone(), vars.clone());
+            if action_save_and_apply {
+                self.apply_saved_var_preset(tab_id, &path);
+            } else if vars.is_empty() {
+                self.toast(format!("已清除 {name} 的预设勾选变量"));
+            } else {
+                self.toast(format!(
+                    "已保存 {name} 的预设勾选变量（{} 个），点击「应用预设」即可生效",
+                    vars.len()
+                ));
+            }
+            return;
+        }
+
+        if keep_open {
+            self.var_preset_dialog = Some(dlg);
+        }
+    }
+
+    fn show_about_window(&mut self, ctx: &egui::Context, pal: &AppPalette) {
+        if !self.about_open {
+            return;
+        }
+
+        let logo_tex = self.textures.app_logo(ctx).map(|t| t.id());
+        let wechat_tex = self.textures.wechat_qr(ctx).map(|t| (t.id(), t.size_vec2()));
+        let mut open = self.about_open;
+        let mut trigger_manual_check = false;
+        let mut copied_msg: Option<&'static str> = None;
+
+        egui::Window::new("关于 SAS 数据集查看器")
+            .id(egui::Id::new("about_app_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(450.0, 0.0))
+            .show(ctx, |ui| {
+                // 1. Header: Logo + App Name + Version Badge
+                ui.horizontal(|ui| {
+                    if let Some(tex_id) = logo_tex {
+                        ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                            tex_id,
+                            Vec2::splat(56.0),
+                        )));
+                        ui.add_space(8.0);
+                    }
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("SAS 数据集查看器")
+                                    .size(18.0)
+                                    .strong()
+                                    .color(pal.text_primary),
+                            );
+                            egui::Frame::NONE
+                                .fill(pal.accent_soft)
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(format!("v{APP_VERSION}"))
+                                            .monospace()
+                                            .strong()
+                                            .size(11.5)
+                                            .color(pal.accent),
+                                    );
+                                });
+                        });
+                        ui.add_space(3.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(
+                                    "基于纯 C (ReadStat) + Rust 列式引擎构建的跨平台高速 SAS 数据集（.sas7bdat / .xpt）桌面查看器。",
+                                )
+                                .size(12.0)
+                                .color(pal.text_muted),
+                            )
+                            .wrap(),
+                        );
+                    });
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // 2. Project Info: GitHub Repo, Author, Contributors
+                egui::Grid::new("about_info_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 7.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("GitHub 仓库").strong().size(12.0).color(pal.text_muted));
+                        ui.horizontal(|ui| {
+                            ui.hyperlink_to(
+                                RichText::new("allensrj/sas-dataset-viewer").size(12.0),
+                                REPO_URL,
+                            );
+                            if ui
+                                .small_button("复制")
+                                .on_hover_text("复制 GitHub 仓库地址")
+                                .clicked()
+                            {
+                                ctx.copy_text(REPO_URL.to_string());
+                                copied_msg = Some("已复制 GitHub 仓库地址");
+                            }
+                        });
+                        ui.end_row();
+
+                        ui.label(RichText::new("作者").strong().size(12.0).color(pal.text_muted));
+                        ui.horizontal(|ui| {
+                            ui.hyperlink_to(
+                                RichText::new("@allensrj").strong().size(12.0),
+                                "https://github.com/allensrj",
+                            );
+                            ui.label(
+                                RichText::new("（药企SP程序员Allen）")
+                                    .size(11.5)
+                                    .color(pal.text_muted),
+                            );
+                        });
+                        ui.end_row();
+
+                        ui.label(RichText::new("贡献者").strong().size(12.0).color(pal.text_muted));
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 3.0;
+                            ui.horizontal_wrapped(|ui| {
+                                ui.hyperlink_to(
+                                    RichText::new("@allensrj").size(11.8),
+                                    "https://github.com/allensrj",
+                                );
+                                ui.label(
+                                    RichText::new("— 项目发起人、核心架构与功能开发")
+                                        .size(11.5)
+                                        .color(pal.text_primary),
+                                );
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.hyperlink_to(
+                                    RichText::new("@wtwang1998 (wentao)").size(11.8),
+                                    "https://github.com/wtwang1998",
+                                );
+                                ui.label(
+                                    RichText::new(
+                                        "— Windows 拖拽冻结修复、渲染架构与低 DPI 清晰度优化",
+                                    )
+                                    .size(11.5)
+                                    .color(pal.text_primary),
+                                );
+                            });
+                        });
+                        ui.end_row();
+                    });
+
+                ui.add_space(10.0);
+
+                // 3. Version Update Checker Section
+                let is_checking = self.updater.is_checking();
+                egui::Frame::NONE
+                    .fill(pal.bg_header_name)
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(10))
+                    .stroke(Stroke::new(1.0, pal.border_grid))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("版本检查（当前 v{APP_VERSION}）"))
+                                    .strong()
+                                    .size(12.2)
+                                    .color(pal.text_primary),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let btn_lbl = if is_checking {
+                                        "正在检查..."
+                                    } else {
+                                        "检查更新"
+                                    };
+                                    if ui
+                                        .add_enabled(!is_checking, egui::Button::new(btn_lbl).small())
+                                        .clicked()
+                                    {
+                                        trigger_manual_check = true;
+                                    }
+                                },
+                            );
+                        });
+
+                        ui.add_space(5.0);
+                        match &self.updater.state {
+                            UpdateCheckState::Idle => {
+                                ui.label(
+                                    RichText::new("点击右侧「检查更新」获取 GitHub Releases 最新版本信息。")
+                                        .size(11.3)
+                                        .color(pal.text_muted),
+                                );
+                            }
+                            UpdateCheckState::Checking => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(
+                                        RichText::new("正在连接 GitHub Releases 检查最新版本...")
+                                            .size(11.5)
+                                            .color(pal.text_muted),
+                                    );
+                                });
+                            }
+                            UpdateCheckState::UpToDate { latest_tag } => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "✓ 当前已是最新版本（GitHub 最新发布：{latest_tag}）"
+                                    ))
+                                    .size(11.6)
+                                    .strong()
+                                    .color(Color32::from_rgb(22, 163, 74)),
+                                );
+                            }
+                            UpdateCheckState::UpdateAvailable(info) => {
+                                let date_suffix = info
+                                    .published_at
+                                    .as_deref()
+                                    .map(|d| format!(" · 发布于 {d}"))
+                                    .unwrap_or_default();
+                                ui.label(
+                                    RichText::new(format!(
+                                        "发现新版本 {}{}，建议下载更新！",
+                                        info.tag_name, date_suffix
+                                    ))
+                                    .size(12.0)
+                                    .strong()
+                                    .color(Color32::from_rgb(217, 119, 6)),
+                                );
+                                ui.add_space(5.0);
+                                let download_url = info.html_url.clone();
+                                ui.horizontal(|ui| {
+                                    let dl_btn = egui::Button::new(
+                                        RichText::new("前往 GitHub Release 下载最新版本")
+                                            .color(Color32::WHITE)
+                                            .strong()
+                                            .size(11.8),
+                                    )
+                                    .fill(pal.accent);
+                                    if ui.add(dl_btn).clicked() {
+                                        ctx.open_url(OpenUrl::new_tab(&download_url));
+                                    }
+                                    if ui
+                                        .small_button("复制链接")
+                                        .on_hover_text(&download_url)
+                                        .clicked()
+                                    {
+                                        ctx.copy_text(download_url);
+                                        copied_msg = Some("已复制最新版下载链接");
+                                    }
+                                });
+                            }
+                            UpdateCheckState::Error(err) => {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!("检查更新失败：{err}"))
+                                            .size(11.2)
+                                            .color(Color32::from_rgb(205, 70, 70)),
+                                    )
+                                    .wrap(),
+                                );
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("您也可以手动访问：")
+                                            .size(11.2)
+                                            .color(pal.text_muted),
+                                    );
+                                    ui.hyperlink_to(
+                                        RichText::new("GitHub Releases 页面").size(11.2),
+                                        RELEASES_URL,
+                                    );
+                                });
+                            }
+                        }
+                    });
+
+                // 4. Personal WeChat Official Account Banner (at the very bottom)
+                if let Some((tex_id, orig_size)) = wechat_tex {
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("关注个人微信公众号")
+                                .size(11.5)
+                                .color(pal.text_muted),
+                        );
+                        ui.add_space(5.0);
+                        let target_w = ui.available_width().min(416.0);
+                        let aspect = if orig_size.x > 0.0 {
+                            orig_size.y / orig_size.x
+                        } else {
+                            312.0 / 1080.0
+                        };
+                        let target_h = (target_w * aspect).max(60.0);
+                        ui.add(
+                            egui::Image::new(egui::load::SizedTexture::new(
+                                tex_id,
+                                Vec2::new(target_w, target_h),
+                            ))
+                            .corner_radius(egui::CornerRadius::same(8)),
+                        );
+                    });
+                }
+            });
+
+        self.about_open = open;
+        if trigger_manual_check {
+            self.updater.start_check(true, Some(ctx.clone()));
+        }
+        if let Some(msg) = copied_msg {
+            self.toast(msg);
+        }
+    }
+}
+
+/// Custom vector-painted circle-`i` About button (crisp on all OS/DPIs without Unicode tofu).
+/// Displays a subtle amber/red dot when a newer GitHub Release version is detected.
+fn about_circle_i_button(
+    ui: &mut Ui,
+    pal: &AppPalette,
+    update_info: Option<&crate::updater::ReleaseInfo>,
+) -> bool {
+    let size = Vec2::splat(22.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let center = rect.center();
+    let radius = 8.5;
+    let hovered = resp.hovered();
+    let stroke_color = if hovered { pal.accent } else { pal.text_muted };
+
+    if hovered {
+        ui.painter().circle_filled(center, radius + 1.5, pal.accent_soft);
+    }
+    ui.painter()
+        .circle_stroke(center, radius, Stroke::new(1.4, stroke_color));
+    ui.painter().text(
+        Pos2::new(center.x, center.y + 0.3),
+        Align2::CENTER_CENTER,
+        "i",
+        FontId::proportional(12.2),
+        stroke_color,
+    );
+
+    if update_info.is_some() {
+        let dot_center = Pos2::new(rect.right() - 3.0, rect.top() + 3.5);
+        ui.painter()
+            .circle_filled(dot_center, 3.3, Color32::from_rgb(239, 68, 68));
+    }
+
+    let hover_txt = if let Some(info) = update_info {
+        format!(
+            "关于 SAS 数据集查看器 (v{APP_VERSION})\n发现新版本 {}，点击查看详情与下载链接",
+            info.tag_name
+        )
+    } else {
+        format!("关于 SAS 数据集查看器 (v{APP_VERSION})\n查看软件信息、作者、公众号与检查更新")
+    };
+    resp.on_hover_text(hover_txt).clicked()
 }
 
 /// Compact VS Code-style toggle button for Search options (`Aa`, `全字`, `.*`).
@@ -1120,7 +1844,14 @@ mod tests {
                                     .layout(egui::Layout::top_down(egui::Align::Min)),
                             );
                             child_ui.set_clip_rect(panel_rect);
-                            show_right_panel(&mut child_ui, None, right_tab, focus_var, &pal);
+                            let _ = show_right_panel(
+                                &mut child_ui,
+                                None,
+                                None,
+                                right_tab,
+                                focus_var,
+                                &pal,
+                            );
                         });
                     measured_w = resp.response.rect.width();
                     egui::CentralPanel::default().show(ctx, |_ui| {});

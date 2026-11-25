@@ -28,6 +28,7 @@ pub enum FileTreeAction {
     AddFolderDialog,
     OpenFileDialog,
     AliasChanged { path: PathBuf, new_name: String },
+    RemovedFromSidebar { path: PathBuf },
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +268,7 @@ impl FileTreeState {
         }
         if let Some(rem) = pending_remove {
             config.remove_from_sidebar(&rem);
+            actions.push(FileTreeAction::RemovedFromSidebar { path: rem });
             need_refresh_all = true;
         }
         if let Some(root) = pending_refresh_root {

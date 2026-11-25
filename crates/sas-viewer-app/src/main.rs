@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod assets;
 mod backends;
 mod config;
 mod panels;
 mod sample_gen;
 mod state;
 mod theme;
+mod updater;
 mod window_host;
 
 use backends::BackendKind;

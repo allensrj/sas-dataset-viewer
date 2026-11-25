@@ -35,6 +35,11 @@ pub struct AppConfig {
     /// (`1.0` = initial 100% baseline on that monitor).
     #[serde(default)]
     pub monitor_ui_scales: HashMap<i32, f32>,
+    /// Per-dataset saved variable checkbox presets (keyed by dataset file path).
+    /// Persists across tab closes and restarts until the dataset (or its parent folder)
+    /// is removed from the File Manager sidebar.
+    #[serde(default)]
+    pub dataset_var_presets: HashMap<PathBuf, Vec<String>>,
     #[serde(default)]
     pub dark_mode: bool,
 }
@@ -65,6 +70,7 @@ impl Default for AppConfig {
             left_panel_width: default_left_panel_width(),
             right_panel_width: default_right_panel_width(),
             monitor_ui_scales: HashMap::new(),
+            dataset_var_presets: HashMap::new(),
             dark_mode: false,
         }
     }
@@ -130,15 +136,66 @@ impl AppConfig {
     }
 
     /// Remove from sidebar only (never deletes on disk).
+    /// Also removes any per-dataset saved variable presets attached to the removed dataset
+    /// (or datasets inside a removed folder).
     pub fn remove_from_sidebar(&mut self, path: &Path) {
-        if let Some(pos) = self.root_folders.iter().position(|p| p == path) {
+        let removed_as_file = if let Some(pos) = self.root_folders.iter().position(|p| p == path) {
             self.root_folders.remove(pos);
+            false
         } else if let Some(pos) = self.root_files.iter().position(|p| p == path) {
             self.root_files.remove(pos);
+            true
         } else {
             self.hidden_paths.insert(path.to_path_buf());
+            !path.is_dir()
+        };
+        self.clear_var_presets_under(path, removed_as_file);
+        self.save();
+    }
+
+    fn clear_var_presets_under(&mut self, removed_path: &Path, removed_as_file: bool) {
+        let root_files = &self.root_files;
+        let root_folders = &self.root_folders;
+        let hidden_paths = &self.hidden_paths;
+        self.dataset_var_presets.retain(|dataset_path, _| {
+            if dataset_path == removed_path {
+                return false;
+            }
+            if !removed_as_file && dataset_path.starts_with(removed_path) {
+                // Keep only if this exact dataset is still independently referenced elsewhere
+                let still_in_root_files = root_files.iter().any(|f| f == dataset_path);
+                let still_in_other_root = root_folders
+                    .iter()
+                    .any(|r| dataset_path.starts_with(r) && !hidden_paths.contains(dataset_path));
+                return still_in_root_files || still_in_other_root;
+            }
+            true
+        });
+    }
+
+    /// Return the saved variable checkbox preset for a dataset path, if any.
+    pub fn get_dataset_var_preset(&self, path: &Path) -> Option<&[String]> {
+        self.dataset_var_presets
+            .get(path)
+            .filter(|vars| !vars.is_empty())
+            .map(Vec::as_slice)
+    }
+
+    /// Save (or clear if empty) the variable checkbox preset for a dataset path.
+    pub fn set_dataset_var_preset(&mut self, path: PathBuf, vars: Vec<String>) {
+        if vars.is_empty() {
+            self.dataset_var_presets.remove(&path);
+        } else {
+            self.dataset_var_presets.insert(path, vars);
         }
         self.save();
+    }
+
+    /// Clear the saved variable checkbox preset for a dataset path.
+    pub fn clear_dataset_var_preset(&mut self, path: &Path) {
+        if self.dataset_var_presets.remove(path).is_some() {
+            self.save();
+        }
     }
 
     /// Rename in-app display alias only (never renames on disk).
@@ -204,5 +261,86 @@ impl AppConfig {
             self.monitor_ui_scales.insert(native_key, clamped);
         }
         self.save();
+    }
+}
+
+/// Parse user-entered preset variable names (supports `,`, `，`, `;`, `；`, whitespace, and newlines).
+/// Preserves entered order and deduplicates case-insensitively (SAS variable names are case-insensitive).
+pub fn parse_var_preset_input(raw: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut seen_upper = HashSet::new();
+    for token in raw.split(|c: char| {
+        c == ',' || c == '，' || c == ';' || c == '；' || c.is_whitespace()
+    }) {
+        let cleaned = token
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'' || c == '`');
+        if cleaned.is_empty() {
+            continue;
+        }
+        let key = cleaned.to_ascii_uppercase();
+        if seen_upper.insert(key) {
+            result.push(cleaned.to_string());
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_var_preset_handles_commas_spaces_newlines_and_dups() {
+        assert_eq!(
+            parse_var_preset_input("STUDYID, USUBJID, SUBJID, SITEID"),
+            vec!["STUDYID", "USUBJID", "SUBJID", "SITEID"]
+        );
+        assert_eq!(
+            parse_var_preset_input("studyid，USUBJID; \"SUBJID\"\nSITEID\tusubjid"),
+            vec!["studyid", "USUBJID", "SUBJID", "SITEID"]
+        );
+        assert!(parse_var_preset_input("   , ， ; \n ").is_empty());
+    }
+
+    #[test]
+    fn dataset_var_preset_follows_dataset_until_removed_from_sidebar() {
+        let mut cfg = AppConfig::default();
+        let dir_a = PathBuf::from("/tmp/study_a");
+        let dm_a = dir_a.join("dm.sas7bdat");
+        let ae_a = dir_a.join("ae.sas7bdat");
+        let dm_b = PathBuf::from("/tmp/study_b/dm.sas7bdat");
+
+        cfg.root_folders.push(dir_a.clone());
+        cfg.root_folders.push(PathBuf::from("/tmp/study_b"));
+
+        // Freshly opened dataset has no preset
+        assert!(cfg.get_dataset_var_preset(&dm_a).is_none());
+
+        // Saving presets binds each preset to its dataset
+        cfg.dataset_var_presets
+            .insert(dm_a.clone(), vec!["STUDYID".into(), "USUBJID".into()]);
+        cfg.dataset_var_presets
+            .insert(ae_a.clone(), vec!["USUBJID".into(), "AETERM".into()]);
+        cfg.dataset_var_presets
+            .insert(dm_b.clone(), vec!["SUBJID".into()]);
+
+        assert_eq!(
+            cfg.get_dataset_var_preset(&dm_a),
+            Some(&["STUDYID".to_string(), "USUBJID".to_string()][..])
+        );
+
+        // Removing a single file clears ONLY that file's preset
+        cfg.hidden_paths.insert(dm_a.clone());
+        cfg.clear_var_presets_under(&dm_a, true);
+        assert!(cfg.get_dataset_var_preset(&dm_a).is_none());
+        assert!(cfg.get_dataset_var_preset(&ae_a).is_some());
+        assert!(cfg.get_dataset_var_preset(&dm_b).is_some());
+
+        // Removing the parent root folder clears remaining presets under it, leaving other folders intact
+        cfg.root_folders.retain(|p| p != &dir_a);
+        cfg.clear_var_presets_under(&dir_a, false);
+        assert!(cfg.get_dataset_var_preset(&ae_a).is_none());
+        assert!(cfg.get_dataset_var_preset(&dm_b).is_some());
     }
 }

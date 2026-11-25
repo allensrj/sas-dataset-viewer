@@ -789,6 +789,78 @@ impl DatasetTabState {
         }
     }
 
+    /// Collect names of all currently checked variables in display order.
+    pub fn checked_variable_names(&self) -> Vec<String> {
+        let Some(table) = &self.table else {
+            return Vec::new();
+        };
+        self.column_order
+            .iter()
+            .copied()
+            .filter(|&c| self.column_visible.get(c).copied().unwrap_or(false))
+            .filter_map(|c| table.variables.get(c).map(|m| m.name.clone()))
+            .collect()
+    }
+
+    /// Inspect how a preset variable list matches the current dataset's variables (case-insensitive).
+    /// Returns `(matched_dataset_var_names, unmatched_preset_names)`.
+    pub fn preview_var_preset(&self, preset_vars: &[String]) -> (Vec<String>, Vec<String>) {
+        let Some(table) = &self.table else {
+            return (Vec::new(), preset_vars.to_vec());
+        };
+        let mut matched = Vec::new();
+        let mut unmatched = Vec::new();
+        for name in preset_vars {
+            if let Some(meta) = table
+                .variables
+                .iter()
+                .find(|m| m.name.eq_ignore_ascii_case(name))
+            {
+                matched.push(meta.name.clone());
+            } else {
+                unmatched.push(name.clone());
+            }
+        }
+        (matched, unmatched)
+    }
+
+    /// Apply a preset list of variable names to `column_visible` (case-insensitive).
+    /// Returns `(matched_count, unmatched_names)`. If zero variables match, leaves checkboxes unchanged.
+    pub fn apply_var_preset(&mut self, preset_vars: &[String]) -> (usize, Vec<String>) {
+        let Some(table) = &self.table else {
+            return (0, preset_vars.to_vec());
+        };
+        let mut matched_flags = vec![false; table.variables.len()];
+        let mut matched_count = 0usize;
+        let mut unmatched = Vec::new();
+
+        for name in preset_vars {
+            let mut found = false;
+            for (idx, meta) in table.variables.iter().enumerate() {
+                if meta.name.eq_ignore_ascii_case(name) {
+                    if !matched_flags[idx] {
+                        matched_flags[idx] = true;
+                        matched_count += 1;
+                    }
+                    found = true;
+                }
+            }
+            if !found {
+                unmatched.push(name.clone());
+            }
+        }
+
+        if matched_count > 0 {
+            if self.column_visible.len() != matched_flags.len() {
+                self.column_visible = matched_flags;
+            } else {
+                self.column_visible.copy_from_slice(&matched_flags);
+            }
+        }
+
+        (matched_count, unmatched)
+    }
+
     pub fn move_column_by(&mut self, col_idx: usize, delta: isize) -> bool {
         let vis = self.visible_columns();
         let Some(vis_pos) = vis.iter().position(|&c| c == col_idx) else {
@@ -1250,5 +1322,128 @@ mod tests {
         // Click on Count -> Count asc: "."(2), "2"(3), "10"(5)
         tab.toggle_stats_freq_sort(StatsFreqSortField::Count);
         assert_eq!(vals(&tab), vec![".", "2", "10"]);
+    }
+
+    #[test]
+    fn test_apply_var_preset_case_insensitive_and_safe_on_zero_match() {
+        use sas_engine::{
+            ColumnData, DatasetMetadata, SasDateKind, SasFormatKind, StringColumn, VariableMeta,
+        };
+
+        let make_var = |index: usize, name: &str| VariableMeta {
+            index,
+            name: name.to_string(),
+            label: String::new(),
+            format: String::new(),
+            var_type: VarType::String,
+            storage_width: 8,
+            display_width: 8,
+            date_kind: SasDateKind::None,
+            decimal_places: None,
+        };
+        let empty_str_col = || {
+            ColumnData::String(StringColumn::Flat {
+                data: Vec::new(),
+                offsets: vec![0],
+            })
+        };
+        let table = Arc::new(ColumnarTable {
+            metadata: DatasetMetadata {
+                path: PathBuf::from("dm.sas7bdat"),
+                format_kind: SasFormatKind::Sas7bdat,
+                table_name: "DM".into(),
+                file_label: String::new(),
+                file_encoding: "UTF-8".into(),
+                encoding_choice: EncodingChoice::Auto,
+                declared_row_count: 0,
+                is_64bit: true,
+                compression: String::new(),
+                file_size_bytes: 0,
+            },
+            variables: vec![
+                make_var(0, "STUDYID"),
+                make_var(1, "USUBJID"),
+                make_var(2, "SUBJID"),
+                make_var(3, "SITEID"),
+                make_var(4, "AGE"),
+            ],
+            columns: vec![
+                empty_str_col(),
+                empty_str_col(),
+                empty_str_col(),
+                empty_str_col(),
+                empty_str_col(),
+            ],
+            row_count: 0,
+            load_elapsed_ms: 0,
+            is_complete: true,
+        });
+
+        let mut tab = DatasetTabState {
+            id: 1,
+            path: PathBuf::from("dm.sas7bdat"),
+            display_name: "dm.sas7bdat".into(),
+            encoding: EncodingChoice::Auto,
+            table: None,
+            loading: false,
+            load_progress: 1.0,
+            rows_loaded_so_far: 0,
+            load_error: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            loader_rx: None,
+            query: ViewQuery::default(),
+            visible_rows: Vec::new(),
+            filter_version: 0,
+            column_order: Vec::new(),
+            column_visible: Vec::new(),
+            column_widths: Vec::new(),
+            focus_region: FocusRegion::DataGrid,
+            selected_cell: None,
+            selected_cells: BTreeSet::new(),
+            selected_var: None,
+            scroll_to_col: None,
+            scroll_to_row: None,
+            stats_col: None,
+            stats_cache_key: None,
+            cached_stats: None,
+            stats_freq_sort: StatsFreqSort::default(),
+            stats_selected_indices: BTreeSet::new(),
+            stats_anchor_idx: None,
+            search_query: String::new(),
+            search_options: CellSearchOptions::default(),
+            search_executed_query: String::new(),
+            search_executed_options: CellSearchOptions::default(),
+            search_matcher: None,
+            search_error: None,
+            search_filter_version: 0,
+            search_vis_cols: Vec::new(),
+            search_matches: Vec::new(),
+            search_current_idx: None,
+            search_truncated: false,
+            var_search: String::new(),
+            filter_dialog: None,
+            dragging_col: None,
+            grid_scroll_offset: egui::Vec2::ZERO,
+            last_query_ms: 0,
+        };
+        tab.install_table(table);
+        assert_eq!(tab.column_visible, vec![true, true, true, true, true]);
+
+        // Case-insensitive match + unknown variable reported as unmatched
+        let (matched, unmatched) = tab.apply_var_preset(&[
+            "studyid".into(),
+            "USUBJID".into(),
+            "SubjId".into(),
+            "UNKNOWN_VAR".into(),
+        ]);
+        assert_eq!(matched, 3);
+        assert_eq!(unmatched, vec!["UNKNOWN_VAR"]);
+        assert_eq!(tab.column_visible, vec![true, true, true, false, false]);
+
+        // Zero-match preset does NOT blank out existing checkboxes
+        let (matched0, unmatched0) = tab.apply_var_preset(&["NOPE".into()]);
+        assert_eq!(matched0, 0);
+        assert_eq!(unmatched0, vec!["NOPE"]);
+        assert_eq!(tab.column_visible, vec![true, true, true, false, false]);
     }
 }

@@ -596,6 +596,7 @@ impl CpuBackend {
 
         let attrs = Window::default_attributes()
             .with_title(title)
+            .with_window_icon(crate::assets::load_window_icon())
             .with_inner_size(LogicalSize::new(1440.0, 880.0))
             .with_min_inner_size(LogicalSize::new(920.0, 560.0))
             .with_visible(false);

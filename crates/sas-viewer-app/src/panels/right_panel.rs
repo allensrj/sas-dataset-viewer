@@ -844,6 +844,7 @@ fn show_shortcuts_tab(ui: &mut Ui, pal: &AppPalette) {
                     ("Ctrl/Cmd + F", "聚焦右侧变量栏搜索框"),
                     ("Ctrl/Cmd + B", "收起 / 展开左侧文件管理器"),
                     ("Ctrl/Cmd + \\", "收起 / 展开最右侧信息栏"),
+                    ("Ctrl/Cmd + / - / 0", "放大 / 缩小 / 重置界面缩放（100% 屏默认 1.2x 清晰度放大，按显示器独立记忆）"),
                     ("拖入数据集文件", "自动纳入文件所在整个目录的全部 XPT / SAS7BDAT 数据集"),
                 ],
                 pal,

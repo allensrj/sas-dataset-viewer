@@ -16,7 +16,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::window::{Window, WindowId};
+use winit::window::WindowId;
 
 #[derive(Debug, Clone, Copy)]
 enum HostEvent {
@@ -59,9 +59,10 @@ fn create_backend(
 /// 同样的字体在 200% 缩放下有 2 倍像素，过渡只相当于笔画的一半，看起来就干净。
 ///
 /// Windows 自带控件靠 ClearType/hinting 把竖笔画吸附到整像素，所以同缩放比例下更锐利；
-/// egui 不提供这个能力，最实际的缓解办法是把低 DPI 屏上的 UI 默认放大一档，
-/// 让同一字号落在更多物理像素上。
-const LOW_DPI_THRESHOLD: f32 = 1.5;
+/// egui 不提供这个能力，最实际的缓解办法是把低 DPI 屏（原生缩放 < 1.2，即 100% 屏）
+/// 上的 UI 默认放大到 1.2x；而 125% 及以上屏幕本身有效像素密度已 >= 1.25x，保持 1.0x
+/// 以避免在 1080p 125% 笔记本上被叠加放大到 150%。
+const LOW_DPI_THRESHOLD: f32 = 1.2;
 const LOW_DPI_ZOOM: f32 = 1.2;
 
 fn default_zoom_for(native_ppp: f32) -> f32 {
@@ -173,11 +174,15 @@ impl WindowHost {
     ///
     /// 只在「原生缩放因子发生变化」时应用一次（启动、拖到另一块屏幕），
     /// 这样用户随后用 `Ctrl +` / `Ctrl -` / `Ctrl 0` 手动调整的缩放不会被每帧覆盖。
-    /// 用户手动调过的倍率会按显示器记住（见 [`ZoomPrefs`]），跨屏来回拖动不会被冲掉。
-    fn apply_default_zoom(&mut self, window: &Window) {
-        let native_ppp = window.scale_factor() as f32;
-        if self.zoom_applied_for == Some(native_ppp) {
-            return;
+    /// 切换显示器前会先把上一块屏幕可能刚发生的手动缩放同步进 [`ZoomPrefs`]，
+    /// 避免“按完 Ctrl- 立刻拖到副屏”时丢失记录。
+    fn apply_default_zoom(&mut self, native_ppp: f32) {
+        if let Some(prev_ppp) = self.zoom_applied_for {
+            if native_key(prev_ppp) == native_key(native_ppp) {
+                return;
+            }
+            let current = self.egui_ctx.zoom_factor();
+            self.zoom_prefs.sync_from_ui(prev_ppp, current);
         }
         self.zoom_applied_for = Some(native_ppp);
         let zoom = self.zoom_prefs.desired_for(native_ppp);
@@ -186,18 +191,14 @@ impl WindowHost {
 
     /// 记录用户手动改过的缩放（`Ctrl +/-/0`），供跨显示器恢复。
     fn sync_user_zoom(&mut self) {
-        let Some(backend) = self.backend.as_ref() else {
+        let Some(native_ppp) = self.zoom_applied_for else {
             return;
         };
-        let native_ppp = backend.window().scale_factor() as f32;
         let current = self.egui_ctx.zoom_factor();
         self.zoom_prefs.sync_from_ui(native_ppp, current);
     }
 
     fn render_frame(&mut self) {
-        // 先同步用户手动改过的缩放，再取各字段的可变借用
-        self.sync_user_zoom();
-
         let (Some(backend), Some(egui_state), Some(app)) = (
             self.backend.as_mut(),
             self.egui_state.as_mut(),
@@ -253,6 +254,10 @@ impl WindowHost {
                 });
             }
         }
+
+        // `egui::gui_zoom::zoom_with_keyboard` runs inside `ctx.run()` -> `end_pass()`;
+        // sync right after the pass so manual `Ctrl +/-/0` is captured immediately.
+        self.sync_user_zoom();
     }
 }
 
@@ -296,7 +301,7 @@ impl ApplicationHandler<HostEvent> for WindowHost {
         self.app = Some(app);
 
         // 低 DPI 屏默认放大（见 LOW_DPI_THRESHOLD 的说明）
-        self.apply_default_zoom(&window);
+        self.apply_default_zoom(window.scale_factor() as f32);
 
         // Paint first frame while window is invisible, then reveal smoothly
         self.render_frame();
@@ -328,7 +333,7 @@ impl ApplicationHandler<HostEvent> for WindowHost {
         event: WindowEvent,
     ) {
         let mut should_redraw = false;
-        let mut rescale_zoom = false;
+        let mut new_scale_factor: Option<f32> = None;
 
         match &event {
             WindowEvent::CloseRequested => {
@@ -345,9 +350,9 @@ impl ApplicationHandler<HostEvent> for WindowHost {
                     should_redraw = true;
                 }
             }
-            WindowEvent::ScaleFactorChanged { .. } => {
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 should_redraw = true;
-                rescale_zoom = true;
+                new_scale_factor = Some(*scale_factor as f32);
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
@@ -370,12 +375,11 @@ impl ApplicationHandler<HostEvent> for WindowHost {
             }
         }
 
-        // 窗口被拖到另一块缩放比例不同的显示器上：重新计算默认缩放
-        if rescale_zoom {
-            let window = self.backend.as_ref().map(|b| b.window().clone());
-            if let Some(window) = window {
-                self.apply_default_zoom(&window);
-                window.request_redraw();
+        // 窗口被拖到另一块缩放比例不同的显示器上：同步旧屏手动倍率并按新屏重新计算缩放
+        if let Some(sf) = new_scale_factor {
+            self.apply_default_zoom(sf);
+            if let Some(backend) = self.backend.as_ref() {
+                backend.window().request_redraw();
             }
         }
     }
@@ -426,8 +430,8 @@ mod tests {
     #[test]
     fn default_zoom_depends_on_native_scale() {
         assert_eq!(default_zoom_for(1.0), LOW_DPI_ZOOM);
-        assert_eq!(default_zoom_for(1.25), LOW_DPI_ZOOM);
-        // 150% 及以上保持 1:1，不做额外缩放
+        // 125% 及以上屏幕有效像素密度已 >= 1.25x，保持 1:1 避免在 1080p 笔记本上过度放大
+        assert_eq!(default_zoom_for(1.25), 1.0);
         assert_eq!(default_zoom_for(1.5), 1.0);
         assert_eq!(default_zoom_for(2.0), 1.0);
     }

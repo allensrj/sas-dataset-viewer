@@ -1,4 +1,4 @@
-use crate::state::{DatasetTabState, FocusRegion, RightTab};
+use crate::state::{DatasetTabState, FocusRegion, RightTab, StatsFreqSortField};
 use crate::theme::AppPalette;
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2};
 use sas_engine::{format_numeric_value, format_plain_number, ColumnStats, VarType};
@@ -153,10 +153,11 @@ fn show_variables_tab(
         );
     });
 
-    // 4-column compact header bar:
-    // [Checkbox 22px] | 变量 (88px ≈ 10 chars) | 类型 (34px) | Format (62px) | 标签 (remaining)
+    // 5-column compact header bar:
+    // [Checkbox 22px] | # (28px) | 变量 (88px ≈ 10 chars) | 类型 (34px) | Format (62px) | 标签 (remaining)
     let row_h = 23.0;
     let cb_w = 22.0;
+    let num_w = 28.0;
     let var_w = 88.0;
     let type_w = 34.0;
     let fmt_w = 62.0;
@@ -168,11 +169,12 @@ fn show_variables_tab(
         [hdr_rect.left_bottom(), hdr_rect.right_bottom()],
         Stroke::new(1.0, pal.border_header),
     );
-    let x_var = hdr_rect.left() + cb_w;
+    let x_num = hdr_rect.left() + cb_w;
+    let x_var = x_num + num_w;
     let x_type = x_var + var_w;
     let x_fmt = x_type + type_w;
     let x_lbl = x_fmt + fmt_w;
-    for &div_x in &[x_var, x_type, x_fmt, x_lbl] {
+    for &div_x in &[x_num, x_var, x_type, x_fmt, x_lbl] {
         if div_x < hdr_rect.right() {
             ui.painter().line_segment(
                 [Pos2::new(div_x, hdr_rect.top()), Pos2::new(div_x, hdr_rect.bottom())],
@@ -182,6 +184,13 @@ fn show_variables_tab(
     }
     let hdr_font = FontId::proportional(10.8);
     let hdr_painter = ui.painter().with_clip_rect(hdr_rect);
+    hdr_painter.text(
+        Pos2::new(x_num + num_w * 0.5, hdr_rect.center().y),
+        Align2::CENTER_CENTER,
+        "#",
+        hdr_font.clone(),
+        pal.text_muted,
+    );
     hdr_painter.text(
         Pos2::new(x_var + 4.0, hdr_rect.center().y),
         Align2::LEFT_CENTER,
@@ -215,6 +224,7 @@ fn show_variables_tab(
 
     let mut jump_to_col: Option<usize> = None;
     let mut stats_for_col: Option<usize> = None;
+    let font_num = FontId::monospace(10.2);
     let font_name = FontId::proportional(11.6);
     let font_meta = FontId::monospace(10.0);
     let font_label = FontId::proportional(11.0);
@@ -279,14 +289,19 @@ fn show_variables_tab(
                     }
                 }
 
-                // 4 strictly clipped columns: 变量 (88px) | 类型 (34px) | Format (62px) | 标签 (remaining)
-                let rx_var = row_rect.left() + cb_w;
+                // 5 strictly clipped columns: # (28px) | 变量 (88px) | 类型 (34px) | Format (62px) | 标签 (remaining)
+                let rx_num = row_rect.left() + cb_w;
+                let rx_var = rx_num + num_w;
                 let rx_type = rx_var + var_w;
                 let rx_fmt = rx_type + type_w;
                 let rx_lbl = rx_fmt + fmt_w;
 
+                let num_rect = Rect::from_min_max(
+                    Pos2::new(rx_num, row_rect.top()),
+                    Pos2::new(rx_var.min(row_rect.right()), row_rect.bottom()),
+                );
                 let var_rect = Rect::from_min_max(
-                    Pos2::new(rx_var, row_rect.top()),
+                    Pos2::new(rx_var.min(row_rect.right()), row_rect.top()),
                     Pos2::new(rx_type.min(row_rect.right()), row_rect.bottom()),
                 );
                 let type_rect = Rect::from_min_max(
@@ -302,13 +317,26 @@ fn show_variables_tab(
                     row_rect.max,
                 );
 
-                for &div_x in &[rx_var, rx_type, rx_fmt, rx_lbl] {
+                for &div_x in &[rx_num, rx_var, rx_type, rx_fmt, rx_lbl] {
                     if div_x < row_rect.right() {
                         ui.painter().line_segment(
                             [Pos2::new(div_x, row_rect.top()), Pos2::new(div_x, row_rect.bottom())],
                             Stroke::new(1.0, pal.border_grid),
                         );
                     }
+                }
+
+                // Col 0: Original 1-based dataset variable number (matches data grid Tier 1!)
+                if num_rect.width() > 6.0 {
+                    ui.painter()
+                        .with_clip_rect(num_rect.shrink2(Vec2::new(2.0, 0.0)))
+                        .text(
+                            Pos2::new(num_rect.right() - 4.0, num_rect.center().y),
+                            Align2::RIGHT_CENTER,
+                            format!("{}", col_idx + 1),
+                            font_num.clone(),
+                            if is_selected { pal.accent } else { pal.text_muted },
+                        );
                 }
 
                 // Col 1: Variable Name (reserved ~10 chars)
@@ -377,8 +405,8 @@ fn show_variables_tab(
                         );
                 }
 
-                // Interactive hit area for all 4 info columns (excludes checkbox!)
-                let info_rect = Rect::from_min_max(Pos2::new(rx_var, row_rect.top()), row_rect.max);
+                // Interactive hit area for all 5 info columns (excludes checkbox!)
+                let info_rect = Rect::from_min_max(Pos2::new(rx_num, row_rect.top()), row_rect.max);
                 let click_resp = ui.interact(
                     info_rect,
                     Id::new(("var_row_click", tab.id, col_idx)),
@@ -404,7 +432,8 @@ fn show_variables_tab(
                 }
 
                 click_resp.clone().on_hover_text(format!(
-                    "{} ({} | {})\n标签: {}\n单击选中(按 F 看统计 / 按 D 筛选) | 双击跳转列",
+                    "#{} {} ({} | {})\n标签: {}\n单击选中(按 F 看统计 / 按 D 筛选) | 双击跳转列",
+                    col_idx + 1,
                     meta.name,
                     meta.var_type.short_label(),
                     if meta.format.is_empty() { "-" } else { &meta.format },
@@ -487,6 +516,12 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
         .corner_radius(egui::CornerRadius::same(4))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("#{}", col_idx + 1))
+                        .monospace()
+                        .size(11.5)
+                        .color(pal.text_muted),
+                );
                 ui.label(RichText::new(&meta.name).strong().size(13.5).color(pal.accent));
                 let (t_str, t_col) = match meta.var_type {
                     VarType::Numeric => ("Num", pal.badge_num),
@@ -625,13 +660,124 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
             );
         } else {
             ui.label(
-                RichText::new("(点击/Ctrl/Shift多选 · 按 D 筛选)")
+                RichText::new("(点击列头排序 · Ctrl/Shift多选 · D筛选)")
                     .size(10.5)
                     .color(pal.text_muted),
             );
         }
     });
-    ui.separator();
+
+    // 3-column sortable frequency table header: 取值 (flex) | 频数 (56px) | 占比 (52px)
+    let cnt_w = 56.0;
+    let pct_w = 52.0;
+    let hdr_avail_w = ui.available_width().max(150.0);
+    let (fhdr_rect, _) = ui.allocate_exact_size(Vec2::new(hdr_avail_w, 21.0), Sense::hover());
+    ui.painter().rect_filled(fhdr_rect, 0.0, pal.bg_header_name);
+    ui.painter().line_segment(
+        [fhdr_rect.left_bottom(), fhdr_rect.right_bottom()],
+        Stroke::new(1.0, pal.border_header),
+    );
+
+    let fhdr_x_pct = (fhdr_rect.right() - pct_w).max(fhdr_rect.left() + 60.0);
+    let fhdr_x_cnt = (fhdr_x_pct - cnt_w).max(fhdr_rect.left() + 40.0);
+
+    let val_hdr_rect = Rect::from_min_max(
+        fhdr_rect.min,
+        Pos2::new(fhdr_x_cnt, fhdr_rect.bottom()),
+    );
+    let cnt_hdr_rect = Rect::from_min_max(
+        Pos2::new(fhdr_x_cnt, fhdr_rect.top()),
+        Pos2::new(fhdr_x_pct, fhdr_rect.bottom()),
+    );
+    let pct_hdr_rect = Rect::from_min_max(
+        Pos2::new(fhdr_x_pct, fhdr_rect.top()),
+        fhdr_rect.max,
+    );
+
+    let val_hdr_resp = ui.interact(
+        val_hdr_rect,
+        Id::new(("stats_hdr_val", tab.id, col_idx)),
+        Sense::click(),
+    );
+    let cnt_hdr_resp = ui.interact(
+        cnt_hdr_rect,
+        Id::new(("stats_hdr_cnt", tab.id, col_idx)),
+        Sense::click(),
+    );
+    let pct_hdr_resp = ui.interact(
+        pct_hdr_rect,
+        Id::new(("stats_hdr_pct", tab.id, col_idx)),
+        Sense::click(),
+    );
+
+    if val_hdr_resp.hovered() {
+        ui.painter().rect_filled(val_hdr_rect, 0.0, pal.bg_row_hover);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if cnt_hdr_resp.hovered() {
+        ui.painter().rect_filled(cnt_hdr_rect, 0.0, pal.bg_row_hover);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if pct_hdr_resp.hovered() {
+        ui.painter().rect_filled(pct_hdr_rect, 0.0, pal.bg_row_hover);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    ui.painter().line_segment(
+        [Pos2::new(fhdr_x_cnt, fhdr_rect.top()), Pos2::new(fhdr_x_cnt, fhdr_rect.bottom())],
+        Stroke::new(1.0, pal.border_grid),
+    );
+    ui.painter().line_segment(
+        [Pos2::new(fhdr_x_pct, fhdr_rect.top()), Pos2::new(fhdr_x_pct, fhdr_rect.bottom())],
+        Stroke::new(1.0, pal.border_grid),
+    );
+
+    let cur_sort = tab.stats_freq_sort;
+    let val_sort_active = cur_sort.field == StatsFreqSortField::Value;
+    let cnt_sort_active = cur_sort.field == StatsFreqSortField::Count;
+    let val_hdr_lbl = if val_sort_active {
+        if cur_sort.ascending { "取值 ▲" } else { "取值 ▼" }
+    } else {
+        "取值"
+    };
+    let cnt_hdr_lbl = if cnt_sort_active {
+        if cur_sort.ascending { "频数 ▲" } else { "频数 ▼" }
+    } else {
+        "频数"
+    };
+    let fhdr_font = FontId::proportional(10.8);
+    let fhdr_painter = ui.painter().with_clip_rect(fhdr_rect);
+    fhdr_painter.text(
+        Pos2::new(val_hdr_rect.left() + 6.0, val_hdr_rect.center().y),
+        Align2::LEFT_CENTER,
+        val_hdr_lbl,
+        fhdr_font.clone(),
+        if val_sort_active { pal.accent } else { pal.text_muted },
+    );
+    fhdr_painter.text(
+        Pos2::new(cnt_hdr_rect.right() - 5.0, cnt_hdr_rect.center().y),
+        Align2::RIGHT_CENTER,
+        cnt_hdr_lbl,
+        fhdr_font.clone(),
+        if cnt_sort_active { pal.accent } else { pal.text_muted },
+    );
+    fhdr_painter.text(
+        Pos2::new(pct_hdr_rect.right() - 5.0, pct_hdr_rect.center().y),
+        Align2::RIGHT_CENTER,
+        "占比",
+        fhdr_font,
+        pal.text_muted,
+    );
+
+    let mut deferred_sort_toggle: Option<StatsFreqSortField> = None;
+    if val_hdr_resp.clicked() {
+        deferred_sort_toggle = Some(StatsFreqSortField::Value);
+    } else if cnt_hdr_resp.clicked() || pct_hdr_resp.clicked() {
+        deferred_sort_toggle = Some(StatsFreqSortField::Count);
+    }
+    val_hdr_resp.on_hover_text("点击按具体取值正序 (▲) / 倒序 (▼) / 恢复频数降序排序\n数值列按真实数值大小排序，字符列按字典序排序");
+    cnt_hdr_resp.on_hover_text("点击按频数降序 (▼) / 升序 (▲) 排序");
+    pct_hdr_resp.on_hover_text("点击按占比/频数降序 (▼) / 升序 (▲) 排序");
 
     let mut apply_filter_negate: Option<bool> = None;
     let row_h = 22.0;
@@ -668,12 +814,32 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
                 );
                 ui.painter().rect_filled(bar_rect, 1.0, pal.bar_fill);
 
-                let right_text = format!("{} ({:.1}%)", entry.count, entry.percent);
-                let right_w = 96.0;
+                // 3-column cell coordinates aligned with header: 取值 | 频数 | 占比
+                let x_pct = (rect.right() - pct_w).max(rect.left() + 60.0);
+                let x_cnt = (x_pct - cnt_w).max(rect.left() + 40.0);
+
+                ui.painter().line_segment(
+                    [Pos2::new(x_cnt, rect.top()), Pos2::new(x_cnt, rect.bottom())],
+                    Stroke::new(1.0, pal.border_grid),
+                );
+                ui.painter().line_segment(
+                    [Pos2::new(x_pct, rect.top()), Pos2::new(x_pct, rect.bottom())],
+                    Stroke::new(1.0, pal.border_grid),
+                );
+
                 let val_clip = Rect::from_min_max(
                     rect.min,
-                    Pos2::new((rect.right() - right_w).max(rect.left() + 30.0), rect.bottom()),
+                    Pos2::new((x_cnt - 2.0).max(rect.left() + 12.0), rect.bottom()),
                 );
+                let cnt_clip = Rect::from_min_max(
+                    Pos2::new(x_cnt, rect.top()),
+                    Pos2::new(x_pct, rect.bottom()),
+                );
+                let pct_clip = Rect::from_min_max(
+                    Pos2::new(x_pct, rect.top()),
+                    rect.max,
+                );
+
                 ui.painter().with_clip_rect(val_clip).text(
                     Pos2::new(rect.left() + 6.0, rect.center().y - 1.0),
                     Align2::LEFT_CENTER,
@@ -685,11 +851,18 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
                         pal.text_primary
                     },
                 );
-                ui.painter().text(
-                    Pos2::new(rect.right() - 4.0, rect.center().y - 1.0),
+                ui.painter().with_clip_rect(cnt_clip).text(
+                    Pos2::new(x_pct - 5.0, rect.center().y - 1.0),
                     Align2::RIGHT_CENTER,
-                    &right_text,
+                    entry.count.to_string(),
                     FontId::monospace(10.8),
+                    pal.text_primary,
+                );
+                ui.painter().with_clip_rect(pct_clip).text(
+                    Pos2::new(rect.right() - 5.0, rect.center().y - 1.0),
+                    Align2::RIGHT_CENTER,
+                    format!("{:.1}%", entry.percent),
+                    FontId::monospace(10.6),
                     pal.text_muted,
                 );
 
@@ -772,6 +945,10 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
                 });
             }
         });
+
+    if let Some(field) = deferred_sort_toggle {
+        tab.toggle_stats_freq_sort(field);
+    }
 
     if let Some(negate) = apply_filter_negate {
         if let Some((c, op)) = tab.build_stats_selection_filter(negate) {

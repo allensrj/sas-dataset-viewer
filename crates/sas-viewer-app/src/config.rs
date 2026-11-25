@@ -31,6 +31,10 @@ pub struct AppConfig {
     pub left_panel_width: f32,
     #[serde(default = "default_right_panel_width")]
     pub right_panel_width: f32,
+    /// Per-monitor user display scale multiplier keyed by `round(native_scale_factor * 1000)`
+    /// (`1.0` = initial 100% baseline on that monitor).
+    #[serde(default)]
+    pub monitor_ui_scales: HashMap<i32, f32>,
     #[serde(default)]
     pub dark_mode: bool,
 }
@@ -44,7 +48,7 @@ fn default_left_panel_width() -> f32 {
 }
 
 fn default_right_panel_width() -> f32 {
-    360.0
+    390.0
 }
 
 impl Default for AppConfig {
@@ -60,6 +64,7 @@ impl Default for AppConfig {
             right_panel_open: true,
             left_panel_width: default_left_panel_width(),
             right_panel_width: default_right_panel_width(),
+            monitor_ui_scales: HashMap::new(),
             dark_mode: false,
         }
     }
@@ -187,6 +192,17 @@ impl AppConfig {
         let insert_idx = to_idx.min(order.len());
         order.insert(insert_idx, item);
         self.custom_orders.insert(parent_dir.to_path_buf(), order);
+        self.save();
+    }
+
+    /// Persist user-chosen display scale multiplier (`1.0` = default 100%) for a monitor DPI key.
+    pub fn set_ui_scale_for_monitor(&mut self, native_key: i32, scale: f32) {
+        let clamped = scale.clamp(0.6, 2.5);
+        if (clamped - 1.0).abs() < 0.005 {
+            self.monitor_ui_scales.remove(&native_key);
+        } else {
+            self.monitor_ui_scales.insert(native_key, clamped);
+        }
         self.save();
     }
 }

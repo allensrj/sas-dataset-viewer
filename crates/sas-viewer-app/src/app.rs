@@ -11,6 +11,28 @@ use sas_engine::{ColumnStats, EncodingChoice, SasFormatKind};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Monitor DPI baseline passed from `WindowHost` so the bottom-right display scale
+/// control starts cleanly at `100%` on every monitor while cooperating with `ZoomPrefs`.
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayScaleContext {
+    pub native_key: i32,
+    pub base_zoom: f32,
+}
+
+const DISPLAY_SCALE_PRESETS: &[(f32, &str)] = &[
+    (0.75, "75%"),
+    (0.85, "85%"),
+    (0.90, "90%"),
+    (1.00, "100% (默认)"),
+    (1.10, "110%"),
+    (1.20, "120%"),
+    (1.25, "125%"),
+    (1.40, "140%"),
+    (1.50, "150%"),
+    (1.75, "175%"),
+    (2.00, "200%"),
+];
+
 pub struct SasViewerApp {
     config: AppConfig,
     file_tree: FileTreeState,
@@ -48,6 +70,10 @@ impl SasViewerApp {
         }
         app.file_tree.refresh_all(&app.config);
         app
+    }
+
+    pub fn saved_monitor_ui_scales(&self) -> &HashMap<i32, f32> {
+        &self.config.monitor_ui_scales
     }
 
     fn toast(&mut self, msg: impl Into<String>) {
@@ -487,7 +513,7 @@ impl<'a> TabViewer for DatasetDockViewer<'a> {
 }
 
 impl SasViewerApp {
-    pub fn update_ui(&mut self, ctx: &egui::Context) {
+    pub fn update_ui(&mut self, ctx: &egui::Context, display_scale: DisplayScaleContext) {
         let mut any_loading = false;
         for tab in self.tabs.values_mut() {
             tab.poll_loader();
@@ -706,13 +732,15 @@ impl SasViewerApp {
                 });
             });
 
-        // Bottom Status Bar (with folder display name prefix + Encoding Switcher!)
+        // Bottom Status Bar (folder prefix + metrics | display scale selector + Encoding Switcher!)
         egui::TopBottomPanel::bottom("bottom_status_bar")
             .exact_height(26.0)
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
+                    let mut active_enc_state: Option<(u64, EncodingChoice)> = None;
+
                     if let Some(active_id) = self.active_tab_id {
-                        if let Some(tab) = self.tabs.get_mut(&active_id) {
+                        if let Some(tab) = self.tabs.get(&active_id) {
                             let title_with_dir = if let Some(parent) = tab.path.parent() {
                                 let dir_disp = self.config.display_name_for(parent);
                                 if !dir_disp.is_empty() {
@@ -749,28 +777,7 @@ impl SasViewerApp {
                                     .size(11.3)
                                     .color(pal.text_muted),
                                 );
-
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let mut chosen_enc = tab.encoding;
-                                        egui::ComboBox::from_id_salt(("enc_combo", active_id))
-                                            .width(118.0)
-                                            .selected_text(format!("编码: {}", chosen_enc.label()))
-                                            .show_ui(ui, |ui| {
-                                                for &enc in EncodingChoice::ALL {
-                                                    ui.selectable_value(
-                                                        &mut chosen_enc,
-                                                        enc,
-                                                        enc.label(),
-                                                    );
-                                                }
-                                            });
-                                        if chosen_enc != tab.encoding {
-                                            tab.reload_with_encoding(chosen_enc, ctx.clone());
-                                        }
-                                    },
-                                );
+                                active_enc_state = Some((active_id, tab.encoding));
                             } else if tab.loading {
                                 ui.label(
                                     RichText::new(format!("正在加载 {} ...", title_with_dir))
@@ -796,6 +803,73 @@ impl SasViewerApp {
                         } else {
                             self.status_toast = None;
                         }
+                    }
+
+                    // Bottom-right controls (right_to_left): [Encoding]  [Display Scale / 缩放: 100%]
+                    let mut new_encoding: Option<(u64, EncodingChoice)> = None;
+                    let mut new_ui_scale: Option<f32> = None;
+
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if let Some((active_id, cur_enc)) = active_enc_state {
+                                let mut chosen_enc = cur_enc;
+                                egui::ComboBox::from_id_salt(("enc_combo", active_id))
+                                    .width(118.0)
+                                    .selected_text(format!("编码: {}", chosen_enc.label()))
+                                    .show_ui(ui, |ui| {
+                                        for &enc in EncodingChoice::ALL {
+                                            ui.selectable_value(
+                                                &mut chosen_enc,
+                                                enc,
+                                                enc.label(),
+                                            );
+                                        }
+                                    });
+                                if chosen_enc != cur_enc {
+                                    new_encoding = Some((active_id, chosen_enc));
+                                }
+                            }
+
+                            let base = display_scale.base_zoom.max(0.5);
+                            let cur_scale = (ctx.zoom_factor() / base).clamp(0.5, 3.0);
+                            let cur_pct = (cur_scale * 100.0).round() as i32;
+                            let mut chosen_pct = cur_pct;
+                            egui::ComboBox::from_id_salt("ui_display_scale_combo")
+                                .width(88.0)
+                                .selected_text(format!("缩放: {}%", cur_pct))
+                                .show_ui(ui, |ui| {
+                                    for &(scale, label) in DISPLAY_SCALE_PRESETS {
+                                        let pct = (scale * 100.0).round() as i32;
+                                        if ui
+                                            .selectable_value(&mut chosen_pct, pct, label)
+                                            .clicked()
+                                        {
+                                            new_ui_scale = Some(scale);
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "调整整个软件的显示比例与字号大小，适配不同分辨率显示器\n初始 100%，按显示器自动记忆（亦可用 Ctrl/Cmd + / - / 0 微调）",
+                                );
+                        },
+                    );
+
+                    if let Some((tab_id, enc)) = new_encoding {
+                        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                            tab.reload_with_encoding(enc, ctx.clone());
+                        }
+                    }
+                    if let Some(scale) = new_ui_scale {
+                        let target_zoom = (display_scale.base_zoom * scale).clamp(0.5, 3.0);
+                        ctx.set_zoom_factor(target_zoom);
+                        self.config
+                            .set_ui_scale_for_monitor(display_scale.native_key, scale);
+                        self.toast(format!(
+                            "界面显示比例已调整为 {}%",
+                            (scale * 100.0).round() as i32
+                        ));
                     }
                 });
             });

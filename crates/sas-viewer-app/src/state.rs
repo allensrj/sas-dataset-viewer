@@ -26,6 +26,27 @@ pub enum FocusRegion {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatsFreqSortField {
+    Value,
+    Count,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatsFreqSort {
+    pub field: StatsFreqSortField,
+    pub ascending: bool,
+}
+
+impl Default for StatsFreqSort {
+    fn default() -> Self {
+        Self {
+            field: StatsFreqSortField::Count,
+            ascending: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterDialogOpKind {
     StrEq,
     StrNeq,
@@ -106,6 +127,7 @@ pub struct DatasetTabState {
     pub stats_col: Option<usize>,
     pub stats_cache_key: Option<(u64, usize)>,
     pub cached_stats: Option<ColumnStats>,
+    pub stats_freq_sort: StatsFreqSort,
     pub stats_selected_indices: BTreeSet<usize>,
     pub stats_anchor_idx: Option<usize>,
 
@@ -165,6 +187,7 @@ impl DatasetTabState {
             stats_col: None,
             stats_cache_key: None,
             cached_stats: None,
+            stats_freq_sort: StatsFreqSort::default(),
             stats_selected_indices: BTreeSet::new(),
             stats_anchor_idx: None,
             search_query: String::new(),
@@ -452,9 +475,134 @@ impl DatasetTabState {
         if col_changed {
             self.stats_selected_indices.clear();
             self.stats_anchor_idx = None;
+            self.stats_freq_sort = StatsFreqSort::default();
         }
         self.cached_stats = compute_column_stats(table, &self.visible_rows, col_idx);
         self.stats_cache_key = Some(key);
+        self.apply_stats_freq_sort();
+    }
+
+    /// Cycle sort mode on the right Statistics frequency table (Value: asc -> desc -> default Count desc;
+    /// Count/Percent: desc <-> asc). Preserves any currently selected values!
+    pub fn toggle_stats_freq_sort(&mut self, field: StatsFreqSortField) {
+        self.stats_freq_sort = match (field, self.stats_freq_sort.field, self.stats_freq_sort.ascending) {
+            (StatsFreqSortField::Value, StatsFreqSortField::Count, _) => StatsFreqSort {
+                field: StatsFreqSortField::Value,
+                ascending: true,
+            },
+            (StatsFreqSortField::Value, StatsFreqSortField::Value, true) => StatsFreqSort {
+                field: StatsFreqSortField::Value,
+                ascending: false,
+            },
+            (StatsFreqSortField::Value, StatsFreqSortField::Value, false) => StatsFreqSort {
+                field: StatsFreqSortField::Count,
+                ascending: false,
+            },
+            (StatsFreqSortField::Count, StatsFreqSortField::Value, _) => StatsFreqSort {
+                field: StatsFreqSortField::Count,
+                ascending: false,
+            },
+            (StatsFreqSortField::Count, StatsFreqSortField::Count, asc) => StatsFreqSort {
+                field: StatsFreqSortField::Count,
+                ascending: !asc,
+            },
+        };
+        self.apply_stats_freq_sort();
+    }
+
+    /// Sort `cached_stats`'s frequency entries in-place according to `stats_freq_sort`,
+    /// preserving selected rows by value identity.
+    pub fn apply_stats_freq_sort(&mut self) {
+        use std::cmp::Ordering;
+
+        let Some(stats) = &mut self.cached_stats else {
+            return;
+        };
+        let sort = self.stats_freq_sort;
+        let is_numeric = matches!(stats, ColumnStats::Numeric(_));
+        let entries = match stats {
+            ColumnStats::String(ss) => &mut ss.frequencies,
+            ColumnStats::Numeric(ns) => &mut ns.frequencies,
+        };
+
+        let entry_key = |e: &sas_engine::FreqEntry| -> (bool, u8, Option<u64>, String) {
+            (
+                e.is_missing,
+                e.missing_tag,
+                e.raw_numeric.map(|v| v.to_bits()),
+                e.value.clone(),
+            )
+        };
+        let selected_keys: Vec<(bool, u8, Option<u64>, String)> = self
+            .stats_selected_indices
+            .iter()
+            .filter_map(|&idx| entries.get(idx).map(entry_key))
+            .collect();
+        let anchor_key = self
+            .stats_anchor_idx
+            .and_then(|idx| entries.get(idx).map(entry_key));
+
+        let missing_rank = |tag: u8| -> u8 {
+            match tag {
+                b'_' => 0,
+                sas_engine::MISSING_SYSTEM => 1,
+                b'A'..=b'Z' => 2 + (tag - b'A'),
+                _ => 1,
+            }
+        };
+
+        let cmp_value_asc = |a: &sas_engine::FreqEntry, b: &sas_engine::FreqEntry| -> Ordering {
+            if is_numeric {
+                match (a.is_missing, b.is_missing) {
+                    (false, false) => match (a.raw_numeric, b.raw_numeric) {
+                        (Some(va), Some(vb)) => va.total_cmp(&vb),
+                        _ => a.value.cmp(&b.value),
+                    },
+                    (true, false) => Ordering::Less,
+                    (false, true) => Ordering::Greater,
+                    (true, true) => missing_rank(a.missing_tag).cmp(&missing_rank(b.missing_tag)),
+                }
+            } else {
+                match (a.is_missing, b.is_missing) {
+                    (true, false) => Ordering::Less,
+                    (false, true) => Ordering::Greater,
+                    _ => a.value.cmp(&b.value),
+                }
+            }
+        };
+
+        entries.sort_by(|a, b| match sort.field {
+            StatsFreqSortField::Value => {
+                let ord = cmp_value_asc(a, b);
+                if sort.ascending {
+                    ord
+                } else {
+                    ord.reverse()
+                }
+            }
+            StatsFreqSortField::Count => {
+                let ord = if sort.ascending {
+                    a.count.cmp(&b.count)
+                } else {
+                    b.count.cmp(&a.count)
+                };
+                ord.then_with(|| cmp_value_asc(a, b))
+            }
+        });
+
+        // Re-map selection indices to their new sorted positions
+        if !selected_keys.is_empty() {
+            self.stats_selected_indices.clear();
+            for (new_idx, e) in entries.iter().enumerate() {
+                let k = entry_key(e);
+                if selected_keys.contains(&k) {
+                    self.stats_selected_indices.insert(new_idx);
+                }
+                if anchor_key.as_ref() == Some(&k) {
+                    self.stats_anchor_idx = Some(new_idx);
+                }
+            }
+        }
     }
 
     /// Build inclusive (`=` / `in`) or exclusive (`!=` / `not in`) FilterOp from selected rows in the Statistics list.
@@ -979,5 +1127,128 @@ impl DatasetTabState {
 impl Drop for DatasetTabState {
     fn drop(&mut self) {
         self.cancel_flag.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sas_engine::{FreqEntry, NumericStats, MISSING_SYSTEM, MISSING_VALID};
+
+    #[test]
+    fn test_stats_freq_sort_numeric_value_and_selection_preservation() {
+        let mut tab = DatasetTabState {
+            id: 1,
+            path: PathBuf::from("test.xpt"),
+            display_name: "test.xpt".into(),
+            encoding: EncodingChoice::Auto,
+            table: None,
+            loading: false,
+            load_progress: 1.0,
+            rows_loaded_so_far: 0,
+            load_error: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            loader_rx: None,
+            query: ViewQuery::default(),
+            visible_rows: Vec::new(),
+            filter_version: 0,
+            column_order: Vec::new(),
+            column_visible: Vec::new(),
+            column_widths: Vec::new(),
+            focus_region: FocusRegion::StatsList,
+            selected_cell: None,
+            selected_cells: BTreeSet::new(),
+            selected_var: None,
+            scroll_to_col: None,
+            scroll_to_row: None,
+            stats_col: Some(0),
+            stats_cache_key: Some((0, 0)),
+            cached_stats: Some(ColumnStats::Numeric(NumericStats {
+                total_rows: 10,
+                valid_count: 8,
+                missing_count: 2,
+                tagged_missing_counts: Vec::new(),
+                distinct_count: 2,
+                mean: None,
+                std_dev: None,
+                min: Some(2.0),
+                q1: None,
+                median: None,
+                q3: None,
+                max: Some(10.0),
+                sum: None,
+                frequencies: vec![
+                    FreqEntry {
+                        value: "10".into(),
+                        is_missing: false,
+                        raw_numeric: Some(10.0),
+                        missing_tag: MISSING_VALID,
+                        count: 5,
+                        percent: 50.0,
+                    },
+                    FreqEntry {
+                        value: "2".into(),
+                        is_missing: false,
+                        raw_numeric: Some(2.0),
+                        missing_tag: MISSING_VALID,
+                        count: 3,
+                        percent: 30.0,
+                    },
+                    FreqEntry {
+                        value: ".".into(),
+                        is_missing: true,
+                        raw_numeric: None,
+                        missing_tag: MISSING_SYSTEM,
+                        count: 2,
+                        percent: 20.0,
+                    },
+                ],
+                truncated: false,
+            })),
+            stats_freq_sort: StatsFreqSort::default(),
+            stats_selected_indices: BTreeSet::from([1]), // selected "2"
+            stats_anchor_idx: Some(1),
+            search_query: String::new(),
+            search_options: CellSearchOptions::default(),
+            search_executed_query: String::new(),
+            search_executed_options: CellSearchOptions::default(),
+            search_matcher: None,
+            search_error: None,
+            search_filter_version: 0,
+            search_vis_cols: Vec::new(),
+            search_matches: Vec::new(),
+            search_current_idx: None,
+            search_truncated: false,
+            var_search: String::new(),
+            filter_dialog: None,
+            dragging_col: None,
+            grid_scroll_offset: egui::Vec2::ZERO,
+            last_query_ms: 0,
+        };
+
+        // 1st click on Value -> ascending numeric order: ".", "2", "10" (NOT lexicographical "10" < "2"!)
+        tab.toggle_stats_freq_sort(StatsFreqSortField::Value);
+        let vals = |t: &DatasetTabState| -> Vec<String> {
+            match t.cached_stats.as_ref().unwrap() {
+                ColumnStats::Numeric(ns) => ns.frequencies.iter().map(|e| e.value.clone()).collect(),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(vals(&tab), vec![".", "2", "10"]);
+        // Selection "2" stayed selected at index 1!
+        assert!(tab.stats_selected_indices.contains(&1));
+
+        // 2nd click on Value -> descending numeric order: "10", "2", "."
+        tab.toggle_stats_freq_sort(StatsFreqSortField::Value);
+        assert_eq!(vals(&tab), vec!["10", "2", "."]);
+        assert!(tab.stats_selected_indices.contains(&1));
+
+        // 3rd click on Value -> back to default Count desc: "10"(5), "2"(3), "."(2)
+        tab.toggle_stats_freq_sort(StatsFreqSortField::Value);
+        assert_eq!(vals(&tab), vec!["10", "2", "."]);
+
+        // Click on Count -> Count asc: "."(2), "2"(3), "10"(5)
+        tab.toggle_stats_freq_sort(StatsFreqSortField::Count);
+        assert_eq!(vals(&tab), vec![".", "2", "10"]);
     }
 }

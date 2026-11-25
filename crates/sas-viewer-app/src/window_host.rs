@@ -7,7 +7,7 @@
 //! - Coalesces `WindowEvent::Resized` and applies surface resize once at paint time.
 //! - Creates the window invisible and shows it only after the first frame is presented (no startup flash).
 
-use crate::app::SasViewerApp;
+use crate::app::{DisplayScaleContext, SasViewerApp};
 use crate::backends::{BackendKind, RenderBackend};
 use egui::ViewportId;
 use std::path::PathBuf;
@@ -121,7 +121,10 @@ impl ZoomPrefs {
     }
 
     fn remember(&mut self, native_ppp: f32, zoom: f32) {
-        let key = native_key(native_ppp);
+        self.remember_key(native_key(native_ppp), zoom);
+    }
+
+    fn remember_key(&mut self, key: i32, zoom: f32) {
         if let Some(slot) = self.per_native.iter_mut().find(|(k, _)| *k == key) {
             slot.1 = zoom;
         } else {
@@ -223,9 +226,17 @@ impl WindowHost {
             return;
         }
 
+        let active_native_ppp = self
+            .zoom_applied_for
+            .unwrap_or_else(|| window.scale_factor() as f32);
+        let display_scale = DisplayScaleContext {
+            native_key: native_key(active_native_ppp),
+            base_zoom: default_zoom_for(active_native_ppp),
+        };
+
         let raw_input = egui_state.take_egui_input(&window);
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            app.update_ui(ctx);
+            app.update_ui(ctx, display_scale);
         });
 
         egui_state.handle_platform_output(&window, full_output.platform_output);
@@ -295,6 +306,12 @@ impl ApplicationHandler<HostEvent> for WindowHost {
         });
 
         let app = SasViewerApp::from_ctx(&self.egui_ctx, self.initial_paths.clone());
+        // Seed per-monitor ZoomPrefs from saved user display scale preferences (if any)
+        for (&key, &scale) in app.saved_monitor_ui_scales() {
+            let native_ppp = (key as f32) / 1000.0;
+            let eff = (default_zoom_for(native_ppp) * scale.clamp(0.6, 2.5)).clamp(0.5, 3.0);
+            self.zoom_prefs.remember_key(key, eff);
+        }
 
         self.backend = Some(backend);
         self.egui_state = Some(egui_state);

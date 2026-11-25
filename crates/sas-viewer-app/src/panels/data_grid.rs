@@ -10,9 +10,10 @@ use sas_engine::{
 };
 
 const ROW_NUM_WIDTH: f32 = 62.0;
-const HDR_NAME_HEIGHT: f32 = 24.0;
-const HDR_LABEL_HEIGHT: f32 = 20.0;
-const HEADER_TOTAL_HEIGHT: f32 = HDR_NAME_HEIGHT + HDR_LABEL_HEIGHT;
+const HDR_VARNUM_HEIGHT: f32 = 17.0;
+const HDR_NAME_HEIGHT: f32 = 23.0;
+const HDR_LABEL_HEIGHT: f32 = 19.0;
+const HEADER_TOTAL_HEIGHT: f32 = HDR_VARNUM_HEIGHT + HDR_NAME_HEIGHT + HDR_LABEL_HEIGHT;
 const ROW_HEIGHT: f32 = 22.0;
 
 #[derive(Debug, Clone)]
@@ -236,7 +237,7 @@ pub fn show_data_grid(
         );
     }
 
-    // 1. Frozen Corner Header (# / 行号) — left-click restores initial dataset row order (clears sorts)
+    // 1. Frozen Corner Header (编号 / # / 行号) — left-click restores initial dataset row order (clears sorts)
     let corner_rect = Rect::from_min_size(
         grid_rect.min,
         Vec2::new(ROW_NUM_WIDTH, HEADER_TOTAL_HEIGHT),
@@ -252,11 +253,25 @@ pub fn show_data_grid(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
+    let y_tier1_end = corner_rect.top() + HDR_VARNUM_HEIGHT;
+    let y_tier2_end = y_tier1_end + HDR_NAME_HEIGHT;
     ui.painter().rect_filled(corner_rect, 0.0, corner_bg);
+    ui.painter().rect_filled(
+        Rect::from_min_max(corner_rect.min, Pos2::new(corner_rect.right(), y_tier1_end)),
+        0.0,
+        pal.bg_header_label,
+    );
     ui.painter().line_segment(
         [
-            Pos2::new(corner_rect.left(), corner_rect.top() + HDR_NAME_HEIGHT),
-            Pos2::new(corner_rect.right(), corner_rect.top() + HDR_NAME_HEIGHT),
+            Pos2::new(corner_rect.left(), y_tier1_end),
+            Pos2::new(corner_rect.right(), y_tier1_end),
+        ],
+        Stroke::new(1.0, pal.border_grid),
+    );
+    ui.painter().line_segment(
+        [
+            Pos2::new(corner_rect.left(), y_tier2_end),
+            Pos2::new(corner_rect.right(), y_tier2_end),
         ],
         Stroke::new(1.0, pal.border_grid),
     );
@@ -269,20 +284,24 @@ pub fn show_data_grid(
         Stroke::new(1.0, pal.border_header),
     );
     ui.painter().text(
-        Pos2::new(corner_rect.center().x, corner_rect.top() + HDR_NAME_HEIGHT * 0.5),
+        Pos2::new(corner_rect.center().x, corner_rect.top() + HDR_VARNUM_HEIGHT * 0.5),
+        Align2::CENTER_CENTER,
+        "编号",
+        FontId::proportional(9.8),
+        pal.text_muted,
+    );
+    ui.painter().text(
+        Pos2::new(corner_rect.center().x, y_tier1_end + HDR_NAME_HEIGHT * 0.5),
         Align2::CENTER_CENTER,
         if has_sorts { "# ↺" } else { "#" },
-        FontId::proportional(11.8),
+        FontId::proportional(11.6),
         if has_sorts { pal.accent } else { pal.text_muted },
     );
     ui.painter().text(
-        Pos2::new(
-            corner_rect.center().x,
-            corner_rect.top() + HDR_NAME_HEIGHT + HDR_LABEL_HEIGHT * 0.5,
-        ),
+        Pos2::new(corner_rect.center().x, y_tier2_end + HDR_LABEL_HEIGHT * 0.5),
         Align2::CENTER_CENTER,
         if has_sorts { "原序" } else { "行号" },
-        FontId::proportional(10.5),
+        FontId::proportional(10.2),
         if has_sorts { pal.accent } else { pal.text_muted },
     );
 
@@ -873,7 +892,7 @@ pub fn show_data_grid(
         Stroke::new(1.0, pal.border_header),
     );
 
-    // 4. Frozen Two-Tier Column Headers
+    // 4. Frozen Three-Tier Column Headers (Tier 1: Original Var# 1..N | Tier 2: Var Name | Tier 3: Var Label)
     let hdr_clip = Rect::from_min_max(
         Pos2::new(grid_rect.left() + ROW_NUM_WIDTH, grid_rect.top()),
         Pos2::new(grid_rect.right(), grid_rect.top() + HEADER_TOTAL_HEIGHT),
@@ -888,8 +907,11 @@ pub fn show_data_grid(
         .partition_point(|&x| x < scroll_offset.x + hdr_clip.width())
         .min(vis_cols.len());
 
+    let font_var_num = FontId::monospace(10.2);
     let font_var_name = FontId::proportional(12.2);
     let font_var_label = FontId::proportional(10.8);
+    let y_num_end = hdr_clip.top() + HDR_VARNUM_HEIGHT;
+    let y_name_end = y_num_end + HDR_NAME_HEIGHT;
 
     for c_vis in first_hdr_col..end_hdr_col {
         let orig_col = vis_cols[c_vis];
@@ -900,12 +922,16 @@ pub fn show_data_grid(
             Pos2::new(x0, hdr_clip.top()),
             Pos2::new(x1, hdr_clip.bottom()),
         );
-        let name_rect = Rect::from_min_max(
+        let varnum_rect = Rect::from_min_max(
             Pos2::new(x0, hdr_clip.top()),
-            Pos2::new(x1, hdr_clip.top() + HDR_NAME_HEIGHT),
+            Pos2::new(x1, y_num_end),
+        );
+        let name_rect = Rect::from_min_max(
+            Pos2::new(x0, y_num_end),
+            Pos2::new(x1, y_name_end),
         );
         let label_rect = Rect::from_min_max(
-            Pos2::new(x0, hdr_clip.top() + HDR_NAME_HEIGHT),
+            Pos2::new(x0, y_name_end),
             Pos2::new(x1, hdr_clip.bottom()),
         );
 
@@ -915,8 +941,26 @@ pub fn show_data_grid(
         } else {
             pal.bg_header_name
         };
+        let varnum_bg = if is_sel_col {
+            pal.bg_selected_col_hdr
+        } else {
+            pal.bg_header_label
+        };
+        hdr_painter.rect_filled(varnum_rect, 0.0, varnum_bg);
         hdr_painter.rect_filled(name_rect, 0.0, name_bg);
         hdr_painter.rect_filled(label_rect, 0.0, pal.bg_header_label);
+
+        // Tier 1: Original 1-based dataset variable number (1, 2, 3...)
+        let varnum_text = format!("{}", orig_col + 1);
+        hdr_painter
+            .with_clip_rect(varnum_rect.shrink2(Vec2::new(3.0, 0.0)).intersect(hdr_clip))
+            .text(
+                varnum_rect.center(),
+                Align2::CENTER_CENTER,
+                &varnum_text,
+                font_var_num.clone(),
+                if is_sel_col { pal.accent } else { pal.text_muted },
+            );
 
         let sort_info = tab.query.sort_rank(orig_col);
         let has_filter = tab.query.has_filter_on(orig_col);
@@ -977,6 +1021,10 @@ pub fn show_data_grid(
         );
 
         hdr_painter.line_segment(
+            [varnum_rect.left_bottom(), varnum_rect.right_bottom()],
+            Stroke::new(1.0, pal.border_grid),
+        );
+        hdr_painter.line_segment(
             [name_rect.left_bottom(), name_rect.right_bottom()],
             Stroke::new(1.0, pal.border_grid),
         );
@@ -1004,19 +1052,30 @@ pub fn show_data_grid(
             deferred_resize = Some((orig_col, new_w));
         }
 
-        // Split interaction: clicking the Variable Name tier sorts & drags;
-        // clicking the Variable Label tier ONLY selects the variable (no sorting, preventing accidental clicks!).
-        let name_interact_rect = Rect::from_min_max(
+        // Split interaction across 3 tiers:
+        // - Tier 1 (Var#) & Tier 3 (Label): click selects variable ONLY (no sorting, prevents misclicks)
+        // - Tier 2 (Var Name): click sorts (Shift+click multi-sort) & drag reorders columns
+        let varnum_interact_rect = Rect::from_min_max(
             Pos2::new(x0 + 2.0, hdr_clip.top()),
-            Pos2::new((x1 - 4.0).max(x0 + 3.0), hdr_clip.top() + HDR_NAME_HEIGHT),
+            Pos2::new((x1 - 4.0).max(x0 + 3.0), y_num_end),
+        )
+        .intersect(hdr_clip);
+        let name_interact_rect = Rect::from_min_max(
+            Pos2::new(x0 + 2.0, y_num_end),
+            Pos2::new((x1 - 4.0).max(x0 + 3.0), y_name_end),
         )
         .intersect(hdr_clip);
         let label_interact_rect = Rect::from_min_max(
-            Pos2::new(x0 + 2.0, hdr_clip.top() + HDR_NAME_HEIGHT),
+            Pos2::new(x0 + 2.0, y_name_end),
             Pos2::new((x1 - 4.0).max(x0 + 3.0), hdr_clip.bottom()),
         )
         .intersect(hdr_clip);
 
+        let varnum_resp = ui.interact(
+            varnum_interact_rect,
+            Id::new(("col_hdr_varnum", tab.id, orig_col)),
+            Sense::click(),
+        );
         let name_resp = ui.interact(
             name_interact_rect,
             Id::new(("col_hdr_name", tab.id, orig_col)),
@@ -1038,7 +1097,7 @@ pub fn show_data_grid(
             deferred_sort = Some((orig_col, shift));
         }
 
-        if label_resp.clicked() {
+        if varnum_resp.clicked() || label_resp.clicked() {
             tab.selected_var = Some(orig_col);
         }
 
@@ -1047,7 +1106,9 @@ pub fn show_data_grid(
         }
 
         if let Some(src_col) = tab.dragging_col {
-            if src_col != orig_col && (name_resp.hovered() || label_resp.hovered()) {
+            if src_col != orig_col
+                && (varnum_resp.hovered() || name_resp.hovered() || label_resp.hovered())
+            {
                 hdr_painter.line_segment(
                     [Pos2::new(x0, hdr_clip.top()), Pos2::new(x0, hdr_clip.bottom())],
                     Stroke::new(3.0, pal.accent),
@@ -1069,8 +1130,17 @@ pub fn show_data_grid(
         } else {
             &meta.label
         };
+        varnum_resp.clone().on_hover_text(format!(
+            "原始变量编号: #{}\n变量名: {} | 标签: {}\n类型: {} | Format: {}",
+            orig_col + 1,
+            meta.name,
+            label_display,
+            meta.var_type.short_label(),
+            fmt_display,
+        ));
         name_resp.clone().on_hover_text(format!(
-            "变量名: {}\n标签: {}\n类型: {} | Format: {} | 存储长度: {}\n点击变量名排序 | Shift+点击多列叠加排序 | 拖动调整顺序 | 右键更多操作",
+            "变量: #{} {}\n标签: {}\n类型: {} | Format: {} | 存储长度: {}\n点击变量名排序 | Shift+点击多列叠加排序 | 拖动调整顺序 | 右键更多操作",
+            orig_col + 1,
             meta.name,
             label_display,
             meta.var_type.short_label(),
@@ -1078,7 +1148,8 @@ pub fn show_data_grid(
             meta.storage_width
         ));
         label_resp.clone().on_hover_text(format!(
-            "变量名: {}\n标签: {}\n类型: {} | Format: {} | 存储长度: {}\n点击标签仅选中变量（不触发排序，防误触）| 点击上方变量名排序 | 右键更多操作",
+            "变量: #{} {}\n标签: {}\n类型: {} | Format: {} | 存储长度: {}\n点击标签仅选中变量（不触发排序，防误触）| 点击上方变量名排序 | 右键更多操作",
+            orig_col + 1,
             meta.name,
             label_display,
             meta.var_type.short_label(),
@@ -1158,6 +1229,7 @@ pub fn show_data_grid(
                 ui.close_menu();
             }
         };
+        varnum_resp.context_menu(&mut show_col_ctx_menu);
         name_resp.context_menu(&mut show_col_ctx_menu);
         label_resp.context_menu(&mut show_col_ctx_menu);
     }

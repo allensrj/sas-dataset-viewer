@@ -72,6 +72,63 @@ fn default_zoom_for(native_ppp: f32) -> f32 {
     }
 }
 
+fn native_key(native_ppp: f32) -> i32 {
+    (native_ppp * 1000.0).round() as i32
+}
+
+/// 按显示器（以原生缩放因子区分）记住用户手动设置的缩放倍率。
+///
+/// 没有这层记忆时，把窗口从主屏拖到副屏再拖回来，`apply_default_zoom` 会重新
+/// 套用默认值，把用户按 `Ctrl -` 调好的倍率冲掉。未记录过的显示器才回落到
+/// `default_zoom_for`。
+#[derive(Debug)]
+struct ZoomPrefs {
+    /// 最近一次由本程序写入（或刚从用户改动同步过来）的缩放倍率。
+    last_applied: f32,
+    /// (原生缩放 × 1000, 缩放倍率)
+    per_native: Vec<(i32, f32)>,
+}
+
+impl ZoomPrefs {
+    fn new() -> Self {
+        Self {
+            last_applied: 1.0,
+            per_native: Vec::new(),
+        }
+    }
+
+    /// 若用户在本帧改了缩放（与上次应用的倍率不同），记录到当前显示器。
+    fn sync_from_ui(&mut self, native_ppp: f32, current: f32) {
+        if (current - self.last_applied).abs() < 1e-4 {
+            return;
+        }
+        self.last_applied = current;
+        self.remember(native_ppp, current);
+    }
+
+    /// 进入某个显示器时应当使用的倍率：优先恢复用户在这块屏上的选择。
+    fn desired_for(&mut self, native_ppp: f32) -> f32 {
+        let key = native_key(native_ppp);
+        let zoom = self
+            .per_native
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, z)| *z)
+            .unwrap_or_else(|| default_zoom_for(native_ppp));
+        self.last_applied = zoom;
+        zoom
+    }
+
+    fn remember(&mut self, native_ppp: f32, zoom: f32) {
+        let key = native_key(native_ppp);
+        if let Some(slot) = self.per_native.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = zoom;
+        } else {
+            self.per_native.push((key, zoom));
+        }
+    }
+}
+
 struct WindowHost {
     kind: BackendKind,
     initial_paths: Vec<PathBuf>,
@@ -86,6 +143,7 @@ struct WindowHost {
     init_error: Option<String>,
     /// 已经为哪个「原生缩放因子」应用过默认缩放，避免每帧覆盖用户手动缩放。
     zoom_applied_for: Option<f32>,
+    zoom_prefs: ZoomPrefs,
 }
 
 impl WindowHost {
@@ -107,6 +165,7 @@ impl WindowHost {
             window_shown: false,
             init_error: None,
             zoom_applied_for: None,
+            zoom_prefs: ZoomPrefs::new(),
         }
     }
 
@@ -114,16 +173,31 @@ impl WindowHost {
     ///
     /// 只在「原生缩放因子发生变化」时应用一次（启动、拖到另一块屏幕），
     /// 这样用户随后用 `Ctrl +` / `Ctrl -` / `Ctrl 0` 手动调整的缩放不会被每帧覆盖。
+    /// 用户手动调过的倍率会按显示器记住（见 [`ZoomPrefs`]），跨屏来回拖动不会被冲掉。
     fn apply_default_zoom(&mut self, window: &Window) {
         let native_ppp = window.scale_factor() as f32;
         if self.zoom_applied_for == Some(native_ppp) {
             return;
         }
         self.zoom_applied_for = Some(native_ppp);
-        self.egui_ctx.set_zoom_factor(default_zoom_for(native_ppp));
+        let zoom = self.zoom_prefs.desired_for(native_ppp);
+        self.egui_ctx.set_zoom_factor(zoom);
+    }
+
+    /// 记录用户手动改过的缩放（`Ctrl +/-/0`），供跨显示器恢复。
+    fn sync_user_zoom(&mut self) {
+        let Some(backend) = self.backend.as_ref() else {
+            return;
+        };
+        let native_ppp = backend.window().scale_factor() as f32;
+        let current = self.egui_ctx.zoom_factor();
+        self.zoom_prefs.sync_from_ui(native_ppp, current);
     }
 
     fn render_frame(&mut self) {
+        // 先同步用户手动改过的缩放，再取各字段的可变借用
+        self.sync_user_zoom();
+
         let (Some(backend), Some(egui_state), Some(app)) = (
             self.backend.as_mut(),
             self.egui_state.as_mut(),
@@ -343,4 +417,56 @@ pub fn run_app(kind: BackendKind, initial_paths: Vec<PathBuf>) -> Result<(), Str
         return Err(err);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_zoom_depends_on_native_scale() {
+        assert_eq!(default_zoom_for(1.0), LOW_DPI_ZOOM);
+        assert_eq!(default_zoom_for(1.25), LOW_DPI_ZOOM);
+        // 150% 及以上保持 1:1，不做额外缩放
+        assert_eq!(default_zoom_for(1.5), 1.0);
+        assert_eq!(default_zoom_for(2.0), 1.0);
+    }
+
+    /// 回归测试：在主屏用 Ctrl- 缩到 0.5 后，拖到副屏再拖回主屏，
+    /// 必须恢复到 0.5，而不是被默认值 1.0 冲掉。
+    #[test]
+    fn manual_zoom_survives_monitor_round_trip() {
+        let mut prefs = ZoomPrefs::new();
+
+        // 首次进入主屏（200%）：默认 1.0
+        assert_eq!(prefs.desired_for(2.0), 1.0);
+        // 用户在主屏上按 Ctrl- 缩到 0.5
+        prefs.sync_from_ui(2.0, 0.5);
+        // 拖到副屏（100%）：首次进入，用低 DPI 默认值
+        assert_eq!(prefs.desired_for(1.0), LOW_DPI_ZOOM);
+        // 拖回主屏：恢复用户此前手动设置的 0.5
+        assert_eq!(prefs.desired_for(2.0), 0.5);
+    }
+
+    #[test]
+    fn per_monitor_zoom_is_independent() {
+        let mut prefs = ZoomPrefs::new();
+
+        prefs.desired_for(2.0);
+        prefs.sync_from_ui(2.0, 0.6);
+        prefs.desired_for(1.0);
+        prefs.sync_from_ui(1.0, 1.5);
+
+        assert_eq!(prefs.desired_for(2.0), 0.6);
+        assert_eq!(prefs.desired_for(1.0), 1.5);
+    }
+
+    #[test]
+    fn no_record_when_ui_matches_applied_value() {
+        let mut prefs = ZoomPrefs::new();
+        let zoom = prefs.desired_for(1.0);
+        // 用户没有手动改动：不应产生记录
+        prefs.sync_from_ui(1.0, zoom);
+        assert!(prefs.per_native.is_empty());
+    }
 }

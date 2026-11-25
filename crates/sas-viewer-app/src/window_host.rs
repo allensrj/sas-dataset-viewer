@@ -16,7 +16,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::window::WindowId;
+use winit::window::{Window, WindowId};
 
 #[derive(Debug, Clone, Copy)]
 enum HostEvent {
@@ -54,6 +54,24 @@ fn create_backend(
     }
 }
 
+/// egui 的文字光栅化没有 hinting：在 100% 缩放下，界面里的中文只有 11~13 物理像素高，
+/// 笔画本身约 1 像素，而抗锯齿过渡几乎与笔画同宽，字形就会显得发糊、笔画粘连；
+/// 同样的字体在 200% 缩放下有 2 倍像素，过渡只相当于笔画的一半，看起来就干净。
+///
+/// Windows 自带控件靠 ClearType/hinting 把竖笔画吸附到整像素，所以同缩放比例下更锐利；
+/// egui 不提供这个能力，最实际的缓解办法是把低 DPI 屏上的 UI 默认放大一档，
+/// 让同一字号落在更多物理像素上。
+const LOW_DPI_THRESHOLD: f32 = 1.5;
+const LOW_DPI_ZOOM: f32 = 1.2;
+
+fn default_zoom_for(native_ppp: f32) -> f32 {
+    if native_ppp < LOW_DPI_THRESHOLD {
+        LOW_DPI_ZOOM
+    } else {
+        1.0
+    }
+}
+
 struct WindowHost {
     kind: BackendKind,
     initial_paths: Vec<PathBuf>,
@@ -66,6 +84,8 @@ struct WindowHost {
     next_repaint: Option<Instant>,
     window_shown: bool,
     init_error: Option<String>,
+    /// 已经为哪个「原生缩放因子」应用过默认缩放，避免每帧覆盖用户手动缩放。
+    zoom_applied_for: Option<f32>,
 }
 
 impl WindowHost {
@@ -86,7 +106,21 @@ impl WindowHost {
             next_repaint: None,
             window_shown: false,
             init_error: None,
+            zoom_applied_for: None,
         }
+    }
+
+    /// 按当前显示器的原生缩放设置默认 UI 缩放。
+    ///
+    /// 只在「原生缩放因子发生变化」时应用一次（启动、拖到另一块屏幕），
+    /// 这样用户随后用 `Ctrl +` / `Ctrl -` / `Ctrl 0` 手动调整的缩放不会被每帧覆盖。
+    fn apply_default_zoom(&mut self, window: &Window) {
+        let native_ppp = window.scale_factor() as f32;
+        if self.zoom_applied_for == Some(native_ppp) {
+            return;
+        }
+        self.zoom_applied_for = Some(native_ppp);
+        self.egui_ctx.set_zoom_factor(default_zoom_for(native_ppp));
     }
 
     fn render_frame(&mut self) {
@@ -187,6 +221,9 @@ impl ApplicationHandler<HostEvent> for WindowHost {
         self.egui_state = Some(egui_state);
         self.app = Some(app);
 
+        // 低 DPI 屏默认放大（见 LOW_DPI_THRESHOLD 的说明）
+        self.apply_default_zoom(&window);
+
         // Paint first frame while window is invisible, then reveal smoothly
         self.render_frame();
     }
@@ -217,6 +254,7 @@ impl ApplicationHandler<HostEvent> for WindowHost {
         event: WindowEvent,
     ) {
         let mut should_redraw = false;
+        let mut rescale_zoom = false;
 
         match &event {
             WindowEvent::CloseRequested => {
@@ -235,6 +273,7 @@ impl ApplicationHandler<HostEvent> for WindowHost {
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 should_redraw = true;
+                rescale_zoom = true;
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
@@ -253,6 +292,15 @@ impl ApplicationHandler<HostEvent> for WindowHost {
                 should_redraw = true;
             }
             if should_redraw {
+                window.request_redraw();
+            }
+        }
+
+        // 窗口被拖到另一块缩放比例不同的显示器上：重新计算默认缩放
+        if rescale_zoom {
+            let window = self.backend.as_ref().map(|b| b.window().clone());
+            if let Some(window) = window {
+                self.apply_default_zoom(&window);
                 window.request_redraw();
             }
         }

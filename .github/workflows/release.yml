@@ -110,6 +110,9 @@ jobs:
           - **macOS (Apple Silicon)**: `SAS-Dataset-Viewer-macOS-arm64.zip` — Native Apple Metal (`backend-wgpu`), extract to get `SAS Dataset Viewer.app`
           - **Windows Desktop (x64)**: `SAS-Dataset-Viewer-win-x64.exe` — Desktop GPU (`glow` / `wgpu`) with pure-CPU GDI fallback, static CRT
           - **Windows AWS / Server / RDP (x64)**: `SAS-Dataset-Viewer-win-aws.exe` — Pure multi-core CPU Win32 GDI (`backend-cpu`), instant single-process startup, zero GPU/DX12/OpenGL/VC++ dependencies
+
+          > **macOS First-Launch Tip**: If macOS Gatekeeper warns that the app cannot be verified or is damaged after downloading from GitHub, run once in Terminal:
+          > `xattr -cr /path/to/"SAS Dataset Viewer.app"` (or `xattr -cr /Applications/"SAS Dataset Viewer.app"`).
           EOF
           )
           if gh release view "$TAG_NAME" --repo "${{ github.repository }}" >/dev/null 2>&1; then

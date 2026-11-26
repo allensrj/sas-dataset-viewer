@@ -29,6 +29,7 @@ A high-performance, cross-platform desktop viewer for SAS datasets (`.sas7bdat` 
 | `Ctrl/Cmd + / - / 0` | Zoom in / zoom out / reset UI scale (low-DPI 100% displays default to 1.2x clarity zoom, remembered per monitor) |
 
 ## Changelog
+- **`v0.3.3`**: Fixed floating scrollbars overlapping right-aligned values in the last column and the bottom row on hover, aligned frozen column headers and row numbers with the safe content viewport, and reserved scrollbar clearance for the right Statistics frequency table (#6 / #7); added Apache License 2.0 (`LICENSE` / `NOTICE` / About dialog) and complete English documentation (`README_EN.md`).
 - **`v0.3.2`**: Added custom application logo (macOS `AppIcon.icns`, Windows `.exe` icon, window and in-app icons); added top-right circular `i` "About" dialog (app overview, GitHub repo link, author, contributors, and personal WeChat official account); added per-dataset "Preset Variables" & "Apply Preset" in the right Variables tab (e.g., `STUDYID, USUBJID, SUBJID, SITEID`, persisted per dataset until removed from the file explorer); added automatic and manual GitHub Releases update checking (in the "About" dialog and via a top toolbar update badge).
 - **`v0.3.1`**: Added original variable-number header row in the data grid and matching `#` column in the right Variables tab; upgraded the Statistics frequency table to 3 sortable columns (`Value` / `Count` / `Percent`); added a global display scale selector (`75%–200%`, default `100%`, remembered per monitor) on the bottom-right status bar; defaulted low-DPI (100%) displays to 1.2x clarity zoom (#4 / #5).
 - **`v0.3.0`**: Locked right panel width and compact 4-column Variables table (`Name` / `Type` / `Format` / `Label`); unified multi-selection and `D` multi-value filtering across Data Grid and Statistics tab, plus full numeric value listing; added VS Code–style `Search` (character/numeric, `Aa`, whole-word, `.*` regex); 6–30 char adaptive column widths and uniform reset width; preserved original row numbers with `#` header click to restore order, and restricted column sorting to clicking the variable name; auto-imported parent directory on single-file drag-and-drop, fixed sample dataset generation, and prefixed status bar with folder name.
@@ -69,7 +70,7 @@ You can also use the included `.github/workflows/release.yml` workflow to automa
 Thanks to the following developers for contributing to this project:
 
 - [@allensrj](https://github.com/allensrj) — Project creator, core architecture & feature development
-- [@wtwang1998](https://github.com/wtwang1998) (wentao) — Root-cause analysis of Windows drag freeze (#1), default renderer fix (#2), event-loop architecture RFC & empirical verification (#3), and low-DPI display text legibility optimization (#4 / #5)
+- [@wtwang1998](https://github.com/wtwang1998) (wentao) — Root-cause analysis of Windows drag freeze (#1), default renderer fix (#2), event-loop architecture RFC & empirical verification (#3), low-DPI display text legibility optimization (#4 / #5), and floating scrollbar gutter fix (#6 / #7)
 
 ## License & Copyright
 Copyright © 2026 allensrj

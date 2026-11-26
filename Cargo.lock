@@ -2638,7 +2638,7 @@ dependencies = [
 
 [[package]]
 name = "readstat-sys"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "cc",
  "encoding_rs",
@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "sas-engine"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ahash",
  "chrono",
@@ -2796,7 +2796,7 @@ dependencies = [
 
 [[package]]
 name = "sas-viewer-app"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "chrono",
  "directories",

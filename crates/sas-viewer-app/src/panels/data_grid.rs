@@ -16,6 +16,28 @@ const HDR_LABEL_HEIGHT: f32 = 19.0;
 const HEADER_TOTAL_HEIGHT: f32 = HDR_VARNUM_HEIGHT + HDR_NAME_HEIGHT + HDR_LABEL_HEIGHT;
 const ROW_HEIGHT: f32 = 22.0;
 
+/// 滚动条在右/下边缘实际压住的像素宽度。
+///
+/// egui 的悬浮滚动条（`ScrollStyle::floating()`）不参与布局：`allocated_width()` 返回 0，
+/// 但 hover 时条会从 `floating_width` 展开到 `bar_width`，并贴在 `outer_rect.max - bar_outer_margin`
+/// 处绘制。因此“会被盖住”的宽度是 `bar_width + bar_outer_margin`；非悬浮风格下内容本身还会再
+/// 让出 `allocated_width()`，取两者较大值即可兼容两种风格。
+fn scroll_gutter(style: &egui::style::ScrollStyle) -> f32 {
+    let overlaid = style.bar_width + style.bar_outer_margin;
+    overlaid.max(style.allocated_width()).max(0.0)
+}
+
+/// 网格内容的可用右界（不含滚动条条带）。
+fn grid_safe_right(grid_right: f32, gutter: f32) -> f32 {
+    grid_right - gutter
+}
+
+/// 滚动内容的总尺寸：尾部追加 `gutter` 的安全带，使滚动到最右/最底时数据末缘停在
+/// `inner - gutter`，正好让开滚动条条带。内容不足一屏时不产生额外滚动。
+fn content_extent(data: f32, inner: f32, gutter: f32) -> f32 {
+    data.max(inner - gutter) + gutter
+}
+
 #[derive(Debug, Clone)]
 pub enum GridAction {
     ShowStatsFor(usize),
@@ -202,8 +224,11 @@ pub fn show_data_grid(
     let total_data_h = (total_rows as f32) * ROW_HEIGHT;
 
     let avail = ui.available_rect_before_wrap();
-    let viewport_w = (avail.width() - ROW_NUM_WIDTH).max(40.0);
-    let viewport_h = (avail.height() - HEADER_TOTAL_HEIGHT).max(40.0);
+    // 悬浮滚动条不参与布局、直接压在内容上；用安全带把最后 10pt 让出来，避免最后一列
+    // 的数值被 hover 时展开的竖条覆盖（底部横向条同理）。
+    let gutter = scroll_gutter(&ui.spacing().scroll);
+    let viewport_w = (avail.width() - ROW_NUM_WIDTH - gutter).max(40.0);
+    let viewport_h = (avail.height() - HEADER_TOTAL_HEIGHT - gutter).max(40.0);
 
     if let Some(target_col) = tab.scroll_to_col.take() {
         if let Some(vis_idx) = vis_cols.iter().position(|&c| c == target_col) {
@@ -355,6 +380,15 @@ pub fn show_data_grid(
         ),
         grid_rect.max,
     );
+    // ScrollArea 本身仍占满整个 body 区域（滚动条必须贴在真正的右/下边缘），
+    // 但内容绘制裁剪到安全带内侧，条带里永远不出现格子底色或数字。
+    let body_paint_clip = Rect::from_min_max(
+        body_clip_rect.min,
+        Pos2::new(
+            grid_safe_right(body_clip_rect.right(), gutter),
+            (body_clip_rect.bottom() - gutter).max(body_clip_rect.top() + 1.0),
+        ),
+    );
 
     let mut deferred_sort: Option<(usize, bool)> = None;
     let mut deferred_set_sort: Option<(usize, bool, bool)> = None;
@@ -387,8 +421,8 @@ pub fn show_data_grid(
         .auto_shrink([false, false])
         .show_viewport(&mut body_ui, |ui, viewport| {
             let content_size = Vec2::new(
-                total_data_w.max(body_clip_rect.width()),
-                total_data_h.max(body_clip_rect.height()),
+                content_extent(total_data_w, body_clip_rect.width(), gutter),
+                content_extent(total_data_h, body_clip_rect.height(), gutter),
             );
             let (content_rect, _) = ui.allocate_exact_size(content_size, Sense::hover());
 
@@ -417,7 +451,7 @@ pub fn show_data_grid(
                 .partition_point(|&x| x < viewport.max.x)
                 .min(vis_cols.len());
 
-            let painter = ui.painter().with_clip_rect(body_clip_rect);
+            let painter = ui.painter().with_clip_rect(body_paint_clip);
             let pointer_pos = ui.ctx().pointer_latest_pos();
             let font_cell = FontId::proportional(12.2);
 
@@ -554,8 +588,8 @@ pub fn show_data_grid(
                     content_rect.top() + viewport.min.y,
                 ),
                 Pos2::new(
-                    content_rect.left() + viewport.max.x,
-                    content_rect.top() + viewport.max.y,
+                    (content_rect.left() + viewport.max.x).min(body_paint_clip.right()),
+                    (content_rect.top() + viewport.max.y).min(body_paint_clip.bottom()),
                 ),
             );
             let grid_resp = ui.interact(
@@ -1464,5 +1498,97 @@ fn truncate_preview(s: &str, max_chars: usize) -> String {
         format!("{}...", head)
     } else {
         head
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::style::ScrollStyle;
+
+    const EPS: f32 = 1e-3;
+
+    /// 默认悬浮滚动条：条宽 10pt、无外边距，内容必须让开 10pt，
+    /// 否则 hover 展开时最后几像素数字会被压住（本次 bug 的根因）。
+    #[test]
+    fn gutter_for_floating_scrollbar_is_the_expanded_bar_width() {
+        assert!((scroll_gutter(&ScrollStyle::floating()) - 10.0).abs() < EPS);
+    }
+
+    /// `thin()` 同样是悬浮风格：allocated 只有 6，但 hover 时条仍会展开到 10。
+    #[test]
+    fn gutter_for_thin_scrollbar_uses_expanded_width_not_allocated_width() {
+        let style = ScrollStyle::thin();
+        assert!(style.allocated_width() < style.bar_width);
+        assert!((scroll_gutter(&style) - 10.0).abs() < EPS);
+    }
+
+    /// 非悬浮风格会先让出 allocated_width()，安全带至少不能小于它。
+    #[test]
+    fn gutter_never_smaller_than_allocated_width() {
+        let style = ScrollStyle {
+            floating: false,
+            bar_inner_margin: 2.0,
+            bar_width: 8.0,
+            bar_outer_margin: 1.0,
+            ..ScrollStyle::thin()
+        };
+        let overlaid = style.bar_width + style.bar_outer_margin;
+        assert!((scroll_gutter(&style) - overlaid.max(style.allocated_width())).abs() < EPS);
+        assert!(scroll_gutter(&style) >= overlaid);
+    }
+
+    #[test]
+    fn safe_right_subtracts_the_gutter() {
+        assert!((grid_safe_right(1551.0, 10.0) - 1541.0).abs() < EPS);
+        assert!((grid_safe_right(600.0, 0.0) - 600.0).abs() < EPS);
+    }
+
+    /// 内容不足一屏：不追加可滚动距离（否则会出现“没内容也能滚动”的空滚动条）。
+    #[test]
+    fn content_extent_does_not_create_scroll_when_data_fits() {
+        assert!((content_extent(800.0, 1297.0, 10.0) - 1297.0).abs() < EPS);
+    }
+
+    /// 内容超出一屏：可滚动距离比数据多出一个安全带，滚到底时末缘正好停在 inner - gutter。
+    #[test]
+    fn content_extent_adds_one_gutter_when_scrollable() {
+        let (data, inner, gutter) = (2400.0f32, 1297.0f32, 10.0f32);
+        let content = content_extent(data, inner, gutter);
+        assert!((content - (data + gutter)).abs() < EPS);
+        let max_offset = (content - inner).max(0.0);
+        assert!((data - max_offset - (inner - gutter)).abs() < EPS);
+    }
+
+    /// 核心不变量：任何数据宽度下，滚到最右时最后一列右缘都不会进入滚动条条带。
+    #[test]
+    fn last_column_never_enters_the_scrollbar_gutter() {
+        let inner = 1297.0f32;
+        let gutter = 10.0f32;
+        let safe_right = inner - gutter;
+        for data in [0.0f32, 800.0, 1287.0, 1288.0, 1297.0, 1298.0, 2400.0, 9000.0] {
+            let content = content_extent(data, inner, gutter);
+            assert!(content >= inner, "content {content} < inner {inner} for data {data}");
+            let max_offset = (content - inner).max(0.0);
+            let last_right_on_screen = data - max_offset;
+            assert!(
+                last_right_on_screen <= safe_right + EPS,
+                "data {data}: last column right edge {last_right_on_screen} > safe right {safe_right}"
+            );
+        }
+    }
+
+    /// 竖向同理：滚到最底时最后一行下缘不会进入底部横向滚动条条带。
+    #[test]
+    fn last_row_never_enters_the_horizontal_scrollbar_gutter() {
+        let inner_h = 700.0f32;
+        let gutter = 10.0f32;
+        let safe_bottom = inner_h - gutter;
+        for data_h in [0.0f32, 22.0, 690.0, 700.0, 4000.0] {
+            let content = content_extent(data_h, inner_h, gutter);
+            let max_offset = (content - inner_h).max(0.0);
+            let last_bottom_on_screen = data_h - max_offset;
+            assert!(last_bottom_on_screen <= safe_bottom + EPS);
+        }
     }
 }

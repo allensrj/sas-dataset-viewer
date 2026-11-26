@@ -1,6 +1,6 @@
 # SAS Dataset Viewer (XPT / SAS7BDAT)
 
-[简体中文](README.md) | English
+[简体中文](README.md) | English | [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A high-performance, cross-platform desktop viewer for SAS datasets (`.sas7bdat` & `.xpt`), built with pure C ([`ReadStat`](https://github.com/WizardMac/ReadStat), the same parser behind `pyreadstat`), a Rust columnar engine, and a native GPU GUI (`egui` / `egui_dock`).
 
@@ -70,3 +70,10 @@ Thanks to the following developers for contributing to this project:
 
 - [@allensrj](https://github.com/allensrj) — Project creator, core architecture & feature development
 - [@wtwang1998](https://github.com/wtwang1998) (wentao) — Root-cause analysis of Windows drag freeze (#1), default renderer fix (#2), event-loop architecture RFC & empirical verification (#3), and low-DPI display text legibility optimization (#4 / #5)
+
+## License & Copyright
+Copyright © 2026 allensrj
+
+Licensed under the [Apache License, Version 2.0](LICENSE). You may use, modify, and distribute this software in compliance with the License, provided you retain the original copyright notice, license text, and attribution notices in [NOTICE](NOTICE), and state any significant changes made.
+
+Third-party notice: The bundled [`ReadStat`](https://github.com/WizardMac/ReadStat) C parser library is licensed under the MIT License (Copyright © 2013-2016 Evan Miller); see [NOTICE](NOTICE) and [`third_party/readstat/LICENSE`](third_party/readstat/LICENSE).

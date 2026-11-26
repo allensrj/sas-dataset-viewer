@@ -63,6 +63,8 @@ cat > "$CONTENTS_DIR/Info.plist" << 'EOF'
     <string>0.3.2</string>
     <key>CFBundleVersion</key>
     <string>8</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 allensrj. Licensed under the Apache License, Version 2.0.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>CFBundleDocumentTypes</key>

@@ -1,6 +1,6 @@
 # SAS 数据集查看器（XPT / SAS7BDAT）
 
-简体中文 | [English](README_EN.md)
+简体中文 | [English](README_EN.md) | [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 基于纯 C（[`ReadStat`](https://github.com/WizardMac/ReadStat)，与 `pyreadstat` 同源）+ Rust 列式引擎 + 原生 GPU GUI（`egui` / `egui_dock`）构建的跨平台高速 SAS 数据集桌面查看器。
 
@@ -70,4 +70,11 @@ cargo build --release --bin sas-viewer --no-default-features --features backend-
 
 - [@allensrj](https://github.com/allensrj) — 项目发起人、核心架构与功能开发
 - [@wtwang1998](https://github.com/wtwang1998) (wentao) — Windows 拖拽冻结根因分析（#1）、默认渲染器修复（#2）、事件循环架构 RFC 与实测验证（#3）及低 DPI 屏文字清晰度优化（#4 / #5）
+
+## 版权与开源协议（License）
+Copyright © 2026 allensrj
+
+本项目基于 [Apache License 2.0](LICENSE) 开源协议发布。您可以自由使用、修改和分发本软件，但需保留原始版权声明、协议文本及 [NOTICE](NOTICE) 中的归属声明，且需对修改部分作出说明。
+
+第三方组件声明：本项目内置的底层解析库 [`ReadStat`](https://github.com/WizardMac/ReadStat) 基于 MIT 协议开源（Copyright © 2013-2016 Evan Miller），详见 [NOTICE](NOTICE) 与 [`third_party/readstat/LICENSE`](third_party/readstat/LICENSE)。
 

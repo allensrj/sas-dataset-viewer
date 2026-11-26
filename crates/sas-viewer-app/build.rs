@@ -9,7 +9,7 @@ fn main() {
         res.set_icon("assets/app_icon.ico")
             .set("ProductName", "SAS Dataset Viewer")
             .set("FileDescription", "SAS 数据集查看器 (XPT / SAS7BDAT)")
-            .set("LegalCopyright", "MIT License - allensrj");
+            .set("LegalCopyright", "Copyright (c) 2026 allensrj. Licensed under the Apache License, Version 2.0.");
         if let Err(err) = res.compile() {
             println!("cargo:warning=Failed to embed Windows application icon: {err}");
         }

@@ -1568,6 +1568,20 @@ impl SasViewerApp {
                             });
                         });
                         ui.end_row();
+
+                        ui.label(RichText::new("开源协议").strong().size(12.0).color(pal.text_muted));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.hyperlink_to(
+                                RichText::new("Apache License 2.0").size(12.0),
+                                format!("{REPO_URL}/blob/main/LICENSE"),
+                            );
+                            ui.label(
+                                RichText::new("· Copyright © 2026 allensrj")
+                                    .size(11.5)
+                                    .color(pal.text_muted),
+                            );
+                        });
+                        ui.end_row();
                     });
 
                 ui.add_space(10.0);

@@ -9,8 +9,8 @@ members = [
 [workspace.package]
 version = "0.3.2"
 edition = "2021"
-license = "MIT"
-authors = ["SAS Dataset Viewer"]
+license = "Apache-2.0"
+authors = ["allensrj"]
 
 [profile.release]
 opt-level = 3

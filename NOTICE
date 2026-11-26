@@ -1,0 +1,11 @@
+SAS Dataset Viewer
+Copyright 2026 allensrj
+
+This product includes software developed by allensrj and contributors
+(https://github.com/allensrj/sas-dataset-viewer).
+
+This product bundles the ReadStat library (third_party/readstat):
+  ReadStat - C library for reading SAS, SPSS, and Stata files
+  https://github.com/WizardMac/ReadStat
+  Copyright (c) 2013-2016 Evan Miller (except where otherwise noted)
+  Licensed under the MIT License (see third_party/readstat/LICENSE).

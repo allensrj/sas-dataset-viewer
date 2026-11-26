@@ -16,26 +16,51 @@ const HDR_LABEL_HEIGHT: f32 = 19.0;
 const HEADER_TOTAL_HEIGHT: f32 = HDR_VARNUM_HEIGHT + HDR_NAME_HEIGHT + HDR_LABEL_HEIGHT;
 const ROW_HEIGHT: f32 = 22.0;
 
-/// 滚动条在右/下边缘实际压住的像素宽度。
+/// 滚动条在右/下边缘实际占用的总宽度（包含外边距）。
 ///
 /// egui 的悬浮滚动条（`ScrollStyle::floating()`）不参与布局：`allocated_width()` 返回 0，
 /// 但 hover 时条会从 `floating_width` 展开到 `bar_width`，并贴在 `outer_rect.max - bar_outer_margin`
-/// 处绘制。因此“会被盖住”的宽度是 `bar_width + bar_outer_margin`；非悬浮风格下内容本身还会再
+/// 处绘制。因此“会被盖住”的总宽度是 `bar_width + bar_outer_margin`；非悬浮风格下内容本身还会再
 /// 让出 `allocated_width()`，取两者较大值即可兼容两种风格。
-fn scroll_gutter(style: &egui::style::ScrollStyle) -> f32 {
+pub(crate) fn scroll_gutter(style: &egui::style::ScrollStyle) -> f32 {
     let overlaid = style.bar_width + style.bar_outer_margin;
     overlaid.max(style.allocated_width()).max(0.0)
 }
 
-/// 网格内容的可用右界（不含滚动条条带）。
-fn grid_safe_right(grid_right: f32, gutter: f32) -> f32 {
-    grid_right - gutter
+/// 滚动条在 `ScrollArea` 自身 `inner_rect`（即 `viewport`）内部额外侵入的叠加宽度。
+///
+/// - `floating()`：`allocated_width() == 0`，滚动条完全叠在 `viewport` 内侧 → 返回 `10.0`。
+/// - `thin()`：`allocated_width() == 6`，展开宽度 `10` → 额外侵入 `4.0`。
+/// - `solid()`（非悬浮）：`ScrollArea` 已把滚动条放在 `inner_rect` 外侧 → 返回 `0.0`，避免重复预留或产生虚假滚动条。
+pub(crate) fn scroll_overlay_gutter(style: &egui::style::ScrollStyle) -> f32 {
+    if style.floating {
+        (scroll_gutter(style) - style.allocated_width()).max(0.0)
+    } else {
+        0.0
+    }
 }
 
-/// 滚动内容的总尺寸：尾部追加 `gutter` 的安全带，使滚动到最右/最底时数据末缘停在
-/// `inner - gutter`，正好让开滚动条条带。内容不足一屏时不产生额外滚动。
-fn content_extent(data: f32, inner: f32, gutter: f32) -> f32 {
-    data.max(inner - gutter) + gutter
+/// 网格内容的可用右界（不含滚动条条带，且在极窄分屏下不发生矩形反转）。
+fn grid_safe_right(grid_left: f32, grid_right: f32, gutter: f32) -> f32 {
+    (grid_right - gutter).max(grid_left + 1.0)
+}
+
+/// 计算内容区扣除叠加滚动条安全带后的安全裁剪矩形（供数据体、冻结表头与冻结行号统一对齐）。
+fn safe_content_rect(outer: Rect, inner_size: Vec2, overlay_gutter: f32) -> Rect {
+    let right = grid_safe_right(
+        outer.left(),
+        (outer.left() + inner_size.x).min(outer.right()),
+        overlay_gutter,
+    );
+    let bottom = ((outer.top() + inner_size.y).min(outer.bottom()) - overlay_gutter)
+        .max(outer.top() + 1.0);
+    Rect::from_min_max(outer.min, Pos2::new(right, bottom))
+}
+
+/// 滚动内容的总尺寸：尾部追加 `overlay_gutter` 的安全带，使滚动到最右/最底时数据末缘停在
+/// `inner - overlay_gutter`，正好让开滚动条条带。内容不足一屏时不产生额外滚动。
+fn content_extent(data: f32, inner: f32, overlay_gutter: f32) -> f32 {
+    data.max(inner - overlay_gutter) + overlay_gutter
 }
 
 #[derive(Debug, Clone)]
@@ -226,7 +251,9 @@ pub fn show_data_grid(
     let avail = ui.available_rect_before_wrap();
     // 悬浮滚动条不参与布局、直接压在内容上；用安全带把最后 10pt 让出来，避免最后一列
     // 的数值被 hover 时展开的竖条覆盖（底部横向条同理）。
-    let gutter = scroll_gutter(&ui.spacing().scroll);
+    let scroll_style = ui.spacing().scroll;
+    let gutter = scroll_gutter(&scroll_style);
+    let overlay_gutter = scroll_overlay_gutter(&scroll_style);
     let viewport_w = (avail.width() - ROW_NUM_WIDTH - gutter).max(40.0);
     let viewport_h = (avail.height() - HEADER_TOTAL_HEIGHT - gutter).max(40.0);
 
@@ -380,15 +407,6 @@ pub fn show_data_grid(
         ),
         grid_rect.max,
     );
-    // ScrollArea 本身仍占满整个 body 区域（滚动条必须贴在真正的右/下边缘），
-    // 但内容绘制裁剪到安全带内侧，条带里永远不出现格子底色或数字。
-    let body_paint_clip = Rect::from_min_max(
-        body_clip_rect.min,
-        Pos2::new(
-            grid_safe_right(body_clip_rect.right(), gutter),
-            (body_clip_rect.bottom() - gutter).max(body_clip_rect.top() + 1.0),
-        ),
-    );
 
     let mut deferred_sort: Option<(usize, bool)> = None;
     let mut deferred_set_sort: Option<(usize, bool, bool)> = None;
@@ -420,16 +438,20 @@ pub fn show_data_grid(
         .scroll_offset(tab.grid_scroll_offset)
         .auto_shrink([false, false])
         .show_viewport(&mut body_ui, |ui, viewport| {
+            // ScrollArea 本身占满整个 body 区域（滚动条贴在真正的右/下边缘），
+            // 但内容绘制与滚动末缘基于实际 viewport 尺寸扣除叠加安全带，兼顾 floating / thin / solid。
+            let body_paint_clip =
+                safe_content_rect(body_clip_rect, viewport.size(), overlay_gutter);
             let content_size = Vec2::new(
-                content_extent(total_data_w, body_clip_rect.width(), gutter),
-                content_extent(total_data_h, body_clip_rect.height(), gutter),
+                content_extent(total_data_w, viewport.width(), overlay_gutter),
+                content_extent(total_data_h, viewport.height(), overlay_gutter),
             );
             let (content_rect, _) = ui.allocate_exact_size(content_size, Sense::hover());
 
             if total_rows == 0 {
                 ui.painter().text(
                     Pos2::new(
-                        content_rect.left() + viewport.min.x + body_clip_rect.width() * 0.5,
+                        body_paint_clip.center().x,
                         content_rect.top() + viewport.min.y + 60.0,
                     ),
                     Align2::CENTER_CENTER,
@@ -440,15 +462,17 @@ pub fn show_data_grid(
                 return;
             }
 
+            let visible_max_x = viewport.min.x + body_paint_clip.width();
+            let visible_max_y = viewport.min.y + body_paint_clip.height();
             let first_row = ((viewport.min.y / ROW_HEIGHT).floor().max(0.0) as usize).min(total_rows);
             let end_row =
-                (((viewport.max.y / ROW_HEIGHT).ceil().max(0.0) as usize) + 1).min(total_rows);
+                (((visible_max_y / ROW_HEIGHT).ceil().max(0.0) as usize) + 1).min(total_rows);
 
             let first_col_vis = col_x_starts
                 .partition_point(|&x| x <= viewport.min.x)
                 .saturating_sub(1);
             let end_col_vis = col_x_starts
-                .partition_point(|&x| x < viewport.max.x)
+                .partition_point(|&x| x < visible_max_x)
                 .min(vis_cols.len());
 
             let painter = ui.painter().with_clip_rect(body_paint_clip);
@@ -466,7 +490,7 @@ pub fn show_data_grid(
                     Pos2::new(content_rect.left() + viewport.max.x, y1),
                 );
                 let is_hovered_row = pointer_pos
-                    .map(|p| body_clip_rect.contains(p) && p.y >= y0 && p.y < y1)
+                    .map(|p| body_paint_clip.contains(p) && p.y >= y0 && p.y < y1)
                     .unwrap_or(false);
 
                 let bg = if is_sel_row {
@@ -881,14 +905,20 @@ pub fn show_data_grid(
 
     let scroll_offset = scroll_out.state.offset;
     tab.grid_scroll_offset = scroll_offset;
+    let final_body_clip =
+        safe_content_rect(body_clip_rect, scroll_out.inner_rect.size(), overlay_gutter);
 
-    // 3. Frozen Left Row Numbers
-    let row_num_clip = Rect::from_min_max(
+    // 3. Frozen Left Row Numbers (rows clipped to final_body_clip.bottom() so no orphan row protrudes into horizontal gutter)
+    let row_num_full = Rect::from_min_max(
         Pos2::new(grid_rect.left(), grid_rect.top() + HEADER_TOTAL_HEIGHT),
         Pos2::new(grid_rect.left() + ROW_NUM_WIDTH, grid_rect.bottom()),
     );
+    let row_num_clip = Rect::from_min_max(
+        row_num_full.min,
+        Pos2::new(row_num_full.right(), final_body_clip.bottom()),
+    );
+    ui.painter().rect_filled(row_num_full, 0.0, pal.bg_header_label);
     let rn_painter = ui.painter().with_clip_rect(row_num_clip);
-    rn_painter.rect_filled(row_num_clip, 0.0, pal.bg_header_label);
     let first_rn = ((scroll_offset.y / ROW_HEIGHT).floor().max(0.0) as usize).min(total_rows);
     let end_rn = (((scroll_offset.y + row_num_clip.height()) / ROW_HEIGHT)
         .ceil()
@@ -921,18 +951,22 @@ pub fn show_data_grid(
             Stroke::new(1.0, pal.border_grid),
         );
     }
-    rn_painter.line_segment(
-        [row_num_clip.right_top(), row_num_clip.right_bottom()],
+    ui.painter().line_segment(
+        [row_num_full.right_top(), row_num_full.right_bottom()],
         Stroke::new(1.0, pal.border_header),
     );
 
-    // 4. Frozen Three-Tier Column Headers (Tier 1: Original Var# 1..N | Tier 2: Var Name | Tier 3: Var Label)
-    let hdr_clip = Rect::from_min_max(
+    // 4. Frozen Three-Tier Column Headers (clipped to final_body_clip.right() so mid-scroll headers never overhang the scrollbar gutter)
+    let hdr_full = Rect::from_min_max(
         Pos2::new(grid_rect.left() + ROW_NUM_WIDTH, grid_rect.top()),
         Pos2::new(grid_rect.right(), grid_rect.top() + HEADER_TOTAL_HEIGHT),
     );
+    let hdr_clip = Rect::from_min_max(
+        hdr_full.min,
+        Pos2::new(final_body_clip.right(), hdr_full.bottom()),
+    );
+    ui.painter().rect_filled(hdr_full, 0.0, pal.bg_header_label);
     let hdr_painter = ui.painter().with_clip_rect(hdr_clip);
-    hdr_painter.rect_filled(hdr_clip, 0.0, pal.bg_header_label);
 
     let first_hdr_col = col_x_starts
         .partition_point(|&x| x <= scroll_offset.x)
@@ -1268,8 +1302,8 @@ pub fn show_data_grid(
         label_resp.context_menu(&mut show_col_ctx_menu);
     }
 
-    hdr_painter.line_segment(
-        [hdr_clip.left_bottom(), hdr_clip.right_bottom()],
+    ui.painter().line_segment(
+        [hdr_full.left_bottom(), hdr_full.right_bottom()],
         Stroke::new(1.2, pal.border_header),
     );
 
@@ -1539,9 +1573,56 @@ mod tests {
     }
 
     #[test]
-    fn safe_right_subtracts_the_gutter() {
-        assert!((grid_safe_right(1551.0, 10.0) - 1541.0).abs() < EPS);
-        assert!((grid_safe_right(600.0, 0.0) - 600.0).abs() < EPS);
+    fn safe_right_subtracts_the_gutter_and_never_inverts() {
+        assert!((grid_safe_right(0.0, 1551.0, 10.0) - 1541.0).abs() < EPS);
+        assert!((grid_safe_right(0.0, 600.0, 0.0) - 600.0).abs() < EPS);
+        // Narrow split pane where width < gutter must clamp instead of creating an inverted rect
+        assert!((grid_safe_right(100.0, 105.0, 10.0) - 101.0).abs() < EPS);
+    }
+
+    /// 叠加安全带（`scroll_overlay_gutter`）在 floating / thin / solid 三种风格下均不重复扣减。
+    #[test]
+    fn overlay_gutter_avoids_double_counting_across_scroll_styles() {
+        let floating = ScrollStyle::floating();
+        assert!((scroll_overlay_gutter(&floating) - 10.0).abs() < EPS);
+
+        let thin = ScrollStyle::thin();
+        assert!((scroll_overlay_gutter(&thin) - 4.0).abs() < EPS);
+        // thin() 分配了 6pt，再加上 4pt 叠加安全带，总让出恰为 10pt；且不满一屏时不制造虚假滚动条
+        let outer = 1297.0f32;
+        let inner_with_bar = outer - thin.allocated_width();
+        let overlay = scroll_overlay_gutter(&thin);
+        assert!((content_extent(800.0, inner_with_bar, overlay) - inner_with_bar).abs() < EPS);
+        let content = content_extent(2400.0, inner_with_bar, overlay);
+        let max_offset = (content - inner_with_bar).max(0.0);
+        assert!((2400.0 - max_offset - (outer - 10.0)).abs() < EPS);
+
+        let solid = ScrollStyle::solid();
+        assert!((scroll_overlay_gutter(&solid) - 0.0).abs() < EPS);
+        let solid_inner = outer - solid.allocated_width();
+        assert!((content_extent(800.0, solid_inner, 0.0) - solid_inner).abs() < EPS);
+        let solid_content = content_extent(2400.0, solid_inner, 0.0);
+        assert!((solid_content - 2400.0).abs() < EPS);
+    }
+
+    /// `safe_content_rect` 为数据体、冻结表头与冻结行号提供一致的右/下安全边界。
+    #[test]
+    fn safe_content_rect_aligns_body_header_and_row_numbers() {
+        let outer = Rect::from_min_max(Pos2::new(62.0, 59.0), Pos2::new(1062.0, 659.0));
+        // floating(): inner_size == outer.size(), overlay == 10
+        let clipped_float = safe_content_rect(outer, outer.size(), 10.0);
+        assert!((clipped_float.right() - 1052.0).abs() < EPS);
+        assert!((clipped_float.bottom() - 649.0).abs() < EPS);
+
+        // solid(): inner_size already excludes 10pt bar, overlay == 0
+        let clipped_solid = safe_content_rect(outer, outer.size() - Vec2::splat(10.0), 0.0);
+        assert!((clipped_solid.right() - 1052.0).abs() < EPS);
+        assert!((clipped_solid.bottom() - 649.0).abs() < EPS);
+
+        // Ultra-narrow pane never produces negative width or height
+        let tiny = Rect::from_min_max(Pos2::new(62.0, 59.0), Pos2::new(66.0, 63.0));
+        let clipped_tiny = safe_content_rect(tiny, tiny.size(), 10.0);
+        assert!(clipped_tiny.width() >= 1.0 && clipped_tiny.height() >= 1.0);
     }
 
     /// 内容不足一屏：不追加可滚动距离（否则会出现“没内容也能滚动”的空滚动条）。

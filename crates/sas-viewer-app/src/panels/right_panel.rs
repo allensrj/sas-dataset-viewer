@@ -731,6 +731,8 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
     });
 
     // 3-column sortable frequency table header: 取值 (flex) | 频数 (56px) | 占比 (52px)
+    // Reserve overlay scrollbar gutter on the right so right-aligned percentage values are never covered on hover.
+    let sb_gutter = crate::panels::data_grid::scroll_overlay_gutter(&ui.spacing().scroll);
     let cnt_w = 56.0;
     let pct_w = 52.0;
     let hdr_avail_w = ui.available_width().max(150.0);
@@ -741,7 +743,8 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
         Stroke::new(1.0, pal.border_header),
     );
 
-    let fhdr_x_pct = (fhdr_rect.right() - pct_w).max(fhdr_rect.left() + 60.0);
+    let fhdr_content_right = (fhdr_rect.right() - sb_gutter).max(fhdr_rect.left() + 60.0);
+    let fhdr_x_pct = (fhdr_content_right - pct_w).max(fhdr_rect.left() + 60.0);
     let fhdr_x_cnt = (fhdr_x_pct - cnt_w).max(fhdr_rect.left() + 40.0);
 
     let val_hdr_rect = Rect::from_min_max(
@@ -825,7 +828,7 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
         if cnt_sort_active { pal.accent } else { pal.text_muted },
     );
     fhdr_painter.text(
-        Pos2::new(pct_hdr_rect.right() - 5.0, pct_hdr_rect.center().y),
+        Pos2::new(fhdr_content_right - 5.0, pct_hdr_rect.center().y),
         Align2::RIGHT_CENTER,
         "占比",
         fhdr_font,
@@ -869,8 +872,10 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
                     ui.painter().rect_filled(rect, 0.0, pal.bg_row_odd);
                 }
 
-                // Inline frequency bar along bottom
-                let bar_w = (avail_w * ((entry.percent as f32) / 100.0)).clamp(1.0, avail_w);
+                // Inline frequency bar along bottom (kept clear of right overlay scrollbar gutter)
+                let row_content_right = (rect.right() - sb_gutter).max(rect.left() + 60.0);
+                let bar_max_w = (row_content_right - rect.left()).max(1.0);
+                let bar_w = (bar_max_w * ((entry.percent as f32) / 100.0)).clamp(1.0, bar_max_w);
                 let bar_rect = Rect::from_min_size(
                     Pos2::new(rect.left(), rect.bottom() - 2.5),
                     Vec2::new(bar_w, 2.0),
@@ -878,7 +883,7 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
                 ui.painter().rect_filled(bar_rect, 1.0, pal.bar_fill);
 
                 // 3-column cell coordinates aligned with header: 取值 | 频数 | 占比
-                let x_pct = (rect.right() - pct_w).max(rect.left() + 60.0);
+                let x_pct = (row_content_right - pct_w).max(rect.left() + 60.0);
                 let x_cnt = (x_pct - cnt_w).max(rect.left() + 40.0);
 
                 ui.painter().line_segment(
@@ -900,7 +905,7 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
                 );
                 let pct_clip = Rect::from_min_max(
                     Pos2::new(x_pct, rect.top()),
-                    rect.max,
+                    Pos2::new(row_content_right, rect.bottom()),
                 );
 
                 ui.painter().with_clip_rect(val_clip).text(
@@ -922,7 +927,7 @@ fn show_statistics_tab(ui: &mut Ui, tab: &mut DatasetTabState, pal: &AppPalette)
                     pal.text_primary,
                 );
                 ui.painter().with_clip_rect(pct_clip).text(
-                    Pos2::new(rect.right() - 5.0, rect.center().y - 1.0),
+                    Pos2::new(row_content_right - 5.0, rect.center().y - 1.0),
                     Align2::RIGHT_CENTER,
                     format!("{:.1}%", entry.percent),
                     FontId::monospace(10.6),
